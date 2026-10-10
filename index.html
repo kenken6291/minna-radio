@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0a1f">
+<title>NEON WAVE RADIO｜みんなのラジオ局</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=DotGothic16&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="sky" aria-hidden="true"><div class="horizon"></div><div class="grid-floor"></div></div>
+
+<!-- ===================== ログイン画面 ===================== -->
+<section id="authScreen" class="auth-screen" hidden>
+  <div class="auth-card">
+    <div class="auth-logo">
+      <span class="logo-mark">NEON WAVE</span>
+      <span class="logo-sub">みんなでつくる、AIラジオ局</span>
+    </div>
+
+    <div class="seg" role="tablist">
+      <button class="seg-btn is-active" data-auth-tab="login" role="tab">ログイン</button>
+      <button class="seg-btn" data-auth-tab="register" role="tab">新規登録</button>
+      <button class="seg-btn" data-auth-tab="reset" role="tab">パスワード再発行</button>
+    </div>
+
+    <form id="loginForm" class="auth-form" data-auth-panel="login" autocomplete="on">
+      <label class="field"><span>メールアドレス</span>
+        <input type="email" name="email" required autocomplete="email" inputmode="email"></label>
+      <label class="field"><span>パスワード</span>
+        <div class="pw-wrap">
+          <input type="password" name="password" required autocomplete="current-password">
+          <button type="button" class="pw-eye" aria-label="パスワードを表示">👁</button>
+        </div></label>
+      <button class="btn btn-primary btn-block" type="submit">ログイン</button>
+    </form>
+
+    <form id="registerForm" class="auth-form" data-auth-panel="register" hidden>
+      <label class="field"><span>ニックネーム</span>
+        <input type="text" name="nickname" required maxlength="20" placeholder="ラジオネーム"></label>
+      <label class="field"><span>メールアドレス</span>
+        <input type="email" name="email" required autocomplete="email" inputmode="email"></label>
+      <p class="hint">登録すると仮パスワードがメールで届きます。初回ログイン時に新しいパスワードを設定します。</p>
+      <button class="btn btn-primary btn-block" type="submit">仮パスワードを受け取る</button>
+    </form>
+
+    <form id="resetForm" class="auth-form" data-auth-panel="reset" hidden>
+      <label class="field"><span>登録したメールアドレス</span>
+        <input type="email" name="email" required autocomplete="email" inputmode="email"></label>
+      <p class="hint">新しい仮パスワードをメールで送ります。</p>
+      <button class="btn btn-primary btn-block" type="submit">仮パスワードを再発行</button>
+    </form>
+
+    <div id="authMsg" class="auth-msg" role="status" aria-live="polite"></div>
+    <p class="auth-version">v<span class="app-version"></span></p>
+  </div>
+</section>
+
+<!-- ===================== アプリ本体 ===================== -->
+<div id="app" hidden>
+  <header class="topbar">
+    <a class="brand" href="#radio" data-nav="radio">NEON WAVE</a>
+    <nav class="nav" aria-label="メインメニュー">
+      <button class="nav-btn is-active" data-nav="radio"><span aria-hidden="true">📻</span>ラジオ</button>
+      <button class="nav-btn" data-nav="podcast"><span aria-hidden="true">🎧</span>ポッドキャスト</button>
+      <button class="nav-btn" data-nav="rooms"><span aria-hidden="true">🎙</span>ライブルーム</button>
+    </nav>
+    <button class="user-chip" id="userChip" aria-label="設定を開く">
+      <span class="avatar" id="userAvatar"></span><span class="user-name" id="userName"></span>
+    </button>
+  </header>
+
+  <main class="main">
+    <!-- ========== ラジオ ========== -->
+    <section id="view-radio" class="view is-active">
+      <div class="radio-layout">
+        <div class="cabinet-col">
+          <div class="cabinet">
+            <div class="cabinet-head">
+              <div class="onair" id="onAir"><span class="onair-dot"></span>ON AIR</div>
+              <div class="lcd">
+                <span class="lcd-freq" id="lcdFreq"></span>
+                <span class="lcd-text" id="lcdText">STAND BY</span>
+              </div>
+            </div>
+
+            <div class="screen">
+              <div class="turntable" id="turntable">
+                <div class="vinyl" id="vinyl"><div class="vinyl-label" id="vinylLabel"><span>NW</span></div></div>
+                <div class="tonearm" id="tonearm"></div>
+              </div>
+              <div class="yt-wrap" id="ytWrap" hidden><div id="ytHost"></div></div>
+              <canvas id="visualizer" class="visualizer" aria-hidden="true"></canvas>
+            </div>
+
+            <div class="now">
+              <div class="now-badges" id="nowBadges"></div>
+              <h1 class="now-title" id="nowTitle">ようこそ、NEON WAVE へ</h1>
+              <p class="now-artist" id="nowArtist">「放送をはじめる」を押すと、ライブラリの曲が流れます</p>
+            </div>
+
+            <div class="dj-caption" id="djCaption" hidden>
+              <span class="dj-caption-who" id="djCaptionWho"></span>
+              <p id="djCaptionText"></p>
+            </div>
+
+            <div class="cabinet-actions">
+              <button class="btn btn-primary" id="btnStartRadio">▶ 放送をはじめる</button>
+              <button class="btn btn-ghost" id="btnCallDj">🎙 AI DJ にしゃべってもらう</button>
+            </div>
+            <div class="grille" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <div class="side-col">
+          <section class="panel">
+            <h2 class="panel-title">AIパーソナリティ</h2>
+            <div class="persona-list" id="personaList" role="radiogroup" aria-label="AIパーソナリティ"></div>
+            <div class="switch-row">
+              <label class="switch"><input type="checkbox" id="autoDj"><span class="switch-ui"></span>
+                <span>曲間にDJトークを入れる（<span id="djEveryN"></span>曲ごと）</span></label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">ラジオエフェクト</h2>
+            <div class="switch-row">
+              <label class="switch"><input type="checkbox" id="fxLofi"><span class="switch-ui"></span><span>ローファイ（AMラジオ風）</span></label>
+            </div>
+            <label class="slider-row"><span>エコー</span><input type="range" id="fxEcho" min="0" max="0.6" step="0.05"></label>
+            <label class="slider-row"><span>リバーブ</span><input type="range" id="fxReverb" min="0" max="0.8" step="0.05"></label>
+            <button class="btn btn-small btn-ghost" id="btnJingle">ジングルを鳴らす</button>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2 class="panel-title">楽曲ライブラリ</h2>
+              <button class="btn btn-small btn-primary" data-add-kind="song">＋ 曲を追加</button>
+            </div>
+            <div class="chips" id="songFilter">
+              <button class="chip is-active" data-filter="all">すべて</button>
+              <button class="chip" data-filter="ai">AI生成</button>
+              <button class="chip" data-filter="youtube">YouTube</button>
+              <button class="chip" data-filter="mine">自分の登録</button>
+            </div>
+            <ul class="track-list" id="songList"></ul>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== ポッドキャスト ========== -->
+    <section id="view-podcast" class="view">
+      <div class="view-head">
+        <h2 class="view-title">ポッドキャスト</h2>
+        <button class="btn btn-primary" data-add-kind="podcast">＋ エピソードを登録</button>
+      </div>
+      <div id="podcastShows" class="shows"></div>
+    </section>
+
+    <!-- ========== ライブルーム ========== -->
+    <section id="view-rooms" class="view">
+      <div id="roomLobby">
+        <div class="view-head">
+          <h2 class="view-title">ライブルーム</h2>
+          <div class="view-head-actions">
+            <button class="btn btn-ghost btn-small" id="btnReloadRooms">更新</button>
+            <button class="btn btn-primary" id="btnCreateRoom">＋ ルームを開く</button>
+          </div>
+        </div>
+        <ul id="roomList" class="room-list"></ul>
+      </div>
+
+      <div id="roomDetail" class="room" hidden>
+        <div class="room-head">
+          <button class="btn btn-ghost btn-small" id="btnLeaveRoom">← 退出</button>
+          <div class="room-head-text">
+            <h2 id="roomTitle"></h2>
+            <p id="roomTopic"></p>
+          </div>
+          <button class="btn btn-danger btn-small" id="btnCloseRoom" hidden>ルームを終了</button>
+        </div>
+
+        <div class="room-body">
+          <div class="room-people">
+            <h3 class="sub-title">ステージ</h3>
+            <ul class="stage" id="stageList"></ul>
+            <h3 class="sub-title">リスナー <span id="listenerCount"></span></h3>
+            <ul class="audience" id="audienceList"></ul>
+          </div>
+
+          <div class="room-talk">
+            <ol class="timeline" id="timeline" aria-live="polite"></ol>
+            <form class="composer" id="composer">
+              <input type="text" id="composerInput" maxlength="200" placeholder="コメントを書く" autocomplete="off">
+              <button class="btn btn-primary btn-small" type="submit">送信</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="room-controls">
+          <button class="ctl" id="btnHand"><span class="ctl-ico">✋</span><span class="ctl-label">手を挙げる</span></button>
+          <button class="ctl" id="btnRecord"><span class="ctl-ico">🎙</span><span class="ctl-label">録音して話す</span></button>
+          <div class="ctl ctl-ai" id="aiCtl">
+            <select id="roomPersona" aria-label="呼び出すAIパーソナリティ"></select>
+            <button class="btn btn-small btn-primary" id="btnRoomAi">AI DJ を呼ぶ</button>
+          </div>
+          <button class="ctl" id="btnStepDown"><span class="ctl-ico">⬇</span><span class="ctl-label">リスナーに戻る</span></button>
+          <label class="ctl ctl-toggle"><input type="checkbox" id="roomAutoplay" checked><span class="ctl-label">新しい音声を自動再生</span></label>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>NEON WAVE RADIO</span>
+    <span>v<span class="app-version"></span></span>
+  </footer>
+
+  <!-- ===================== プレイヤーバー ===================== -->
+  <div class="player" id="player">
+    <div class="player-disc" id="playerDisc" aria-hidden="true"></div>
+    <div class="player-info">
+      <div class="player-title" id="pTitle">再生していません</div>
+      <div class="player-artist" id="pArtist">—</div>
+    </div>
+    <div class="player-main">
+      <div class="player-btns">
+        <button class="pbtn" id="pShuffle" aria-label="シャッフル" title="シャッフル">🔀</button>
+        <button class="pbtn" id="pPrev" aria-label="前の曲">⏮</button>
+        <button class="pbtn pbtn-play" id="pPlay" aria-label="再生">▶</button>
+        <button class="pbtn" id="pNext" aria-label="次の曲">⏭</button>
+        <button class="pbtn" id="pLoop" aria-label="リピート" title="リピート：オフ">🔁</button>
+      </div>
+      <div class="seek-row">
+        <span class="time" id="pCur">0:00</span>
+        <input type="range" id="pSeek" min="0" max="1000" value="0" aria-label="再生位置">
+        <span class="time" id="pDur">0:00</span>
+      </div>
+    </div>
+    <div class="player-side">
+      <label class="vol"><span aria-hidden="true">🔊</span><input type="range" id="pVol" min="0" max="1" step="0.01" aria-label="音量"></label>
+      <button class="pbtn" id="pList" aria-label="プレイリスト">☰</button>
+    </div>
+    <div class="player-loading" id="pLoading" hidden>読み込み中…</div>
+  </div>
+
+  <aside class="drawer" id="playlistDrawer" hidden>
+    <div class="drawer-head">
+      <h3>プレイリスト</h3>
+      <button class="icon-btn" data-close-drawer aria-label="閉じる">✕</button>
+    </div>
+    <ol class="queue" id="queueList"></ol>
+  </aside>
+</div>
+
+<!-- ===================== モーダル ===================== -->
+<div class="modal" id="modalChangePw" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cpTitle">
+    <h3 id="cpTitle">パスワードの変更</h3>
+    <p class="hint" id="cpLead">新しいパスワードを設定してください。</p>
+    <form id="changePwForm">
+      <label class="field"><span>現在のパスワード（仮パスワード）</span>
+        <div class="pw-wrap"><input type="password" name="currentPassword" required autocomplete="current-password">
+          <button type="button" class="pw-eye" aria-label="パスワードを表示">👁</button></div></label>
+      <label class="field"><span>新しいパスワード（英字と数字を含む8文字以上）</span>
+        <div class="pw-wrap"><input type="password" name="newPassword" required minlength="8" autocomplete="new-password">
+          <button type="button" class="pw-eye" aria-label="パスワードを表示">👁</button></div></label>
+      <label class="field"><span>新しいパスワード（確認）</span>
+        <div class="pw-wrap"><input type="password" name="confirmPassword" required minlength="8" autocomplete="new-password">
+          <button type="button" class="pw-eye" aria-label="パスワードを表示">👁</button></div></label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close id="cpCancel">キャンセル</button>
+        <button type="submit" class="btn btn-primary">パスワードを変更</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="modalAddTrack" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="atTitle">
+    <h3 id="atTitle">曲を追加</h3>
+    <form id="addTrackForm">
+      <div class="seg seg-small" id="atKind">
+        <button type="button" class="seg-btn is-active" data-kind="song">楽曲</button>
+        <button type="button" class="seg-btn" data-kind="podcast">ポッドキャスト</button>
+      </div>
+      <label class="field"><span>登録方法</span>
+        <select name="source" id="atSource">
+          <option value="upload">音声ファイルをアップロード</option>
+          <option value="youtube">YouTube の URL</option>
+          <option value="drivelink">Google Drive の共有リンク</option>
+          <option value="url">外部の音声ファイル URL</option>
+        </select></label>
+      <label class="field" data-src="upload"><span>音声ファイル（<span id="maxMb"></span>MBまで）</span>
+        <input type="file" name="file" accept="audio/*"></label>
+      <label class="field" data-src="link" hidden><span id="atUrlLabel">URL</span>
+        <input type="url" name="url" placeholder="https://"></label>
+      <label class="field"><span>タイトル</span><input type="text" name="title" maxlength="80" required></label>
+      <label class="field" data-kind-only="song"><span>アーティスト</span><input type="text" name="artist" maxlength="60"></label>
+      <label class="field" data-kind-only="podcast" hidden><span>番組名</span><input type="text" name="showName" maxlength="60"></label>
+      <label class="field"><span>説明（任意）</span><textarea name="description" rows="2" maxlength="500"></textarea></label>
+      <label class="switch" data-kind-only="song"><input type="checkbox" name="aiGenerated"><span class="switch-ui"></span><span>AIで生成したオリジナル曲</span></label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+        <button type="submit" class="btn btn-primary" id="atSubmit">登録する</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="modalCreateRoom" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="crTitle">
+    <h3 id="crTitle">ルームを開く</h3>
+    <form id="createRoomForm">
+      <label class="field"><span>ルーム名</span><input type="text" name="title" maxlength="40" required placeholder="例：昭和歌謡を語る夜"></label>
+      <label class="field"><span>テーマ（任意）</span><input type="text" name="topic" maxlength="120" placeholder="何について話す？"></label>
+      <label class="field"><span>ルームのAIパーソナリティ</span><select name="persona" id="crPersona"></select></label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+        <button type="submit" class="btn btn-primary">ルームを開く</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="modalSettings" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="stTitle">
+    <h3 id="stTitle">設定</h3>
+    <dl class="kv">
+      <dt>メール</dt><dd id="stEmail"></dd>
+      <dt>権限</dt><dd id="stRole"></dd>
+      <dt>バージョン</dt><dd>v<span class="app-version"></span></dd>
+    </dl>
+    <form id="profileForm" class="inline-form">
+      <label class="field"><span>ニックネーム</span><input type="text" name="nickname" maxlength="20" required></label>
+      <button class="btn btn-ghost btn-small" type="submit">保存</button>
+    </form>
+    <div class="modal-actions modal-actions-split">
+      <button type="button" class="btn btn-ghost" id="btnOpenChangePw">パスワードを変更</button>
+      <button type="button" class="btn btn-danger" id="btnLogout">ログアウト</button>
+    </div>
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<audio id="musicEl" preload="auto" playsinline></audio>
+<audio id="rawEl" preload="auto" playsinline></audio>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
