@@ -1,6 +1,7 @@
 /**
  * NEON WAVE RADIO - Google Apps Script バックエンド
- * Version 1.0.0
+ * Version 1.1.0
+ *   v1.1.0 パーソナリティ管理 / 台本の掛け合い（複数話者TTS） / AIとの対話（文字起こし＋声変換）
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -13,7 +14,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -24,6 +25,9 @@ const TOUCH_INTERVAL_MS = 15 * 1000;     // lastSeen 更新間隔
 const ROOM_IDLE_CLOSE_MS = 30 * 60 * 1000; // 無人30分で自動クローズ
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_VOICE_BYTES = 5 * 1024 * 1024;
+const MAX_STT_BYTES = 12 * 1024 * 1024;        // 文字起こし用の音声（base64前）
+const MAX_CUSTOM_PERSONAS = 20;                // 1人あたりのパーソナリティ上限
+const PERSONA_CACHE_SEC = 120;
 
 const HEAD = {
   Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
@@ -31,16 +35,54 @@ const HEAD = {
   Tracks:       ['id', 'kind', 'source', 'title', 'artist', 'showName', 'description', 'url', 'fileId', 'youtubeId', 'mimeType', 'aiGenerated', 'ownerId', 'ownerName', 'createdAt'],
   Rooms:        ['id', 'title', 'topic', 'persona', 'hostId', 'hostName', 'status', 'createdAt', 'updatedAt'],
   RoomMembers:  ['roomId', 'userId', 'nickname', 'role', 'hand', 'lastSeen'],
-  RoomMessages: ['id', 'roomId', 'userId', 'nickname', 'type', 'text', 'fileId', 'mimeType', 'persona', 'createdAt']
+  RoomMessages: ['id', 'roomId', 'userId', 'nickname', 'type', 'text', 'fileId', 'mimeType', 'persona', 'createdAt'],
+  Personas:     ['id', 'name', 'icon', 'color', 'gender', 'voice', 'role', 'description', 'style', 'prompt', 'ownerId', 'ownerName', 'createdAt', 'updatedAt']
 };
 
 /* ============================================================
- *  AIパーソナリティ定義（キャラクタープロンプト）
+ *  Gemini TTS の声（gender は目安）
  * ============================================================ */
-const PERSONAS = {
-  midnight: {
-    name: 'ミッドナイト・クルーズ',
-    voice: 'Algenib',
+const VOICES = [
+  { name: 'Zephyr', gender: 'female', desc: '明るい' },
+  { name: 'Kore', gender: 'female', desc: 'しっかり' },
+  { name: 'Leda', gender: 'female', desc: '若々しい' },
+  { name: 'Aoede', gender: 'female', desc: '軽やか' },
+  { name: 'Callirrhoe', gender: 'female', desc: 'おおらか' },
+  { name: 'Autonoe', gender: 'female', desc: 'きらきら' },
+  { name: 'Despina', gender: 'female', desc: 'なめらか' },
+  { name: 'Erinome', gender: 'female', desc: 'クリア' },
+  { name: 'Laomedeia', gender: 'female', desc: '陽気' },
+  { name: 'Achernar', gender: 'female', desc: 'やわらか' },
+  { name: 'Gacrux', gender: 'female', desc: '大人っぽい' },
+  { name: 'Pulcherrima', gender: 'female', desc: 'はきはき' },
+  { name: 'Vindemiatrix', gender: 'female', desc: '穏やか' },
+  { name: 'Sulafat', gender: 'female', desc: '温かい' },
+  { name: 'Puck', gender: 'male', desc: '弾む' },
+  { name: 'Charon', gender: 'male', desc: '知的' },
+  { name: 'Fenrir', gender: 'male', desc: '元気' },
+  { name: 'Orus', gender: 'male', desc: '落ち着き' },
+  { name: 'Enceladus', gender: 'male', desc: '吐息まじり' },
+  { name: 'Iapetus', gender: 'male', desc: 'クリア' },
+  { name: 'Umbriel', gender: 'male', desc: 'おおらか' },
+  { name: 'Algieba', gender: 'male', desc: 'なめらか' },
+  { name: 'Algenib', gender: 'male', desc: 'ハスキー' },
+  { name: 'Rasalgethi', gender: 'male', desc: '語り口調' },
+  { name: 'Alnilam', gender: 'male', desc: '力強い' },
+  { name: 'Schedar', gender: 'male', desc: '安定' },
+  { name: 'Achird', gender: 'male', desc: '親しみ' },
+  { name: 'Zubenelgenubi', gender: 'male', desc: 'カジュアル' },
+  { name: 'Sadachbia', gender: 'male', desc: '生き生き' },
+  { name: 'Sadaltager', gender: 'male', desc: '博識' }
+];
+const VOICE_NAMES = VOICES.map(function (v) { return v.name; });
+
+/* ============================================================
+ *  標準のAIパーソナリティ（画面から複製して自分用を作れます）
+ * ============================================================ */
+const BUILTIN_PERSONAS = [
+  {
+    id: 'midnight', name: 'ミッドナイト・クルーズ', icon: '🌙', color: '#7c6cff', gender: 'male', voice: 'Algenib',
+    role: '深夜ラジオDJ', description: '低めの声で、ゆっくり語りかける夜のDJ',
     style: '深夜2時のラジオDJとして、低めで落ち着いた声で、ささやくように、ゆっくりと間をとって読み上げてください。文末は優しく余韻を残して。',
     prompt: [
       'あなたは深夜2時の静かなスタジオからお届けするラジオDJです。',
@@ -49,9 +91,9 @@ const PERSONAS = {
       '読点「、」を多めに使い、ゆったりした間を作ってください。'
     ].join('\n')
   },
-  morning: {
-    name: 'モーニング・ドライブ',
-    voice: 'Puck',
+  {
+    id: 'morning', name: 'モーニング・ドライブ', icon: '☀️', color: '#ffb547', gender: 'male', voice: 'Puck',
+    role: 'ハイテンションFM DJ', description: '明るく軽快に、朝を盛り上げる看板DJ',
     style: '週末の朝のFMラジオDJとして、明るくエネルギッシュに、軽快なテンポで弾むように読み上げてください。',
     prompt: [
       'あなたは週末の朝を最高に盛り上げるFMラジオの看板DJです！',
@@ -59,17 +101,37 @@ const PERSONAS = {
       '「Hey, Listeners!」「今日も最高の一日にしていきましょう！」など、コール＆レスポンスを意識した親しみやすい口調で話してください。'
     ].join('\n')
   },
-  cafe: {
-    name: 'リラックス・ラウンジ',
-    voice: 'Achird',
+  {
+    id: 'cafe', name: 'リラックス・ラウンジ', icon: '☕', color: '#3fe0c5', gender: 'male', voice: 'Achird',
+    role: 'カフェ風トークパートナー', description: '隠れ家カフェのバリスタと、ゆるっと会話',
     style: '隠れ家カフェのバリスタとして、自然体で柔らかく、友人に話しかけるように丁寧に読み上げてください。',
     prompt: [
       'あなたは隠れ家カフェで淹れたてのコーヒーを淹れながら会話するバリスタ兼ナビゲーターです。',
       '友人とお茶を飲んでいるような自然体で、柔らかく丁寧な語り口で話してください。',
       'ユーザーのコメントや選曲に対して「素敵ですね」「その曲、私も大好きです」と共感を示しながら会話を繋げてください。'
     ].join('\n')
+  },
+  {
+    id: 'sunset', name: 'サンセット・ステーション', icon: '🌇', color: '#ff7a9c', gender: 'female', voice: 'Sulafat',
+    role: '夕方の女性パーソナリティ', description: '温かい声で、一日の終わりに寄り添う',
+    style: '夕方のラジオパーソナリティとして、温かく包み込むように、少しゆったりしたテンポで、笑顔が伝わるように読み上げてください。',
+    prompt: [
+      'あなたは夕方の帯番組を担当する、温かい雰囲気の女性ラジオパーソナリティです。',
+      '仕事や家事を終えたリスナーに「お疲れさまでした」と寄り添い、季節の話題や小さな出来事を大切に語ってください。',
+      '相方の話には優しくうなずき、ときどき素朴な質問を返して会話を広げてください。'
+    ].join('\n')
+  },
+  {
+    id: 'breeze', name: 'ブリーズ・ナビ', icon: '🌿', color: '#7ee081', gender: 'female', voice: 'Leda',
+    role: '元気な女性アシスタント', description: '若々しく明るい、番組の相棒',
+    style: 'ラジオ番組のアシスタントとして、若々しく明るく、はきはきと親しみやすく読み上げてください。',
+    prompt: [
+      'あなたはラジオ番組の明るいアシスタントです。',
+      'メインパーソナリティの話にテンポよく相づちを打ち、ときにはツッコミも入れて番組を盛り上げてください。',
+      '好奇心旺盛で、「えっ、それどういうことですか？」と素直に質問するのが得意です。'
+    ].join('\n')
   }
-};
+];
 
 /* ============================================================
  *  エントリポイント
@@ -107,6 +169,17 @@ const ROUTES = {
   audio_get: audioGet_,
   // AI DJ
   dj_talk: djTalk_,
+  // パーソナリティ
+  personas_list: personasList_,
+  persona_save: personaSave_,
+  persona_delete: personaDelete_,
+  tts_say: ttsSay_,
+  // 台本の掛け合い
+  script_tts: scriptTts_,
+  script_draft: scriptDraft_,
+  // AIとの対話
+  voice_transcribe: voiceTranscribe_,
+  talk_reply: talkReply_,
   // ルーム
   rooms_list: roomsList_,
   room_create: roomCreate_,
@@ -136,8 +209,17 @@ function setup() {
 
 /** TTS 動作確認用（エディタから実行） */
 function testTTS() {
-  const r = tts_('cafe', 'こんにちは。ネオンウェーブ・ラジオの音声テストです。');
+  const r = tts_(personaGet_('cafe'), 'こんにちは。ネオンウェーブ・ラジオの音声テストです。');
   Logger.log('mimeType=' + r.mimeType + ' sampleRate=' + r.sampleRate + ' base64長=' + r.base64.length);
+}
+
+/** 2人の掛け合い（複数話者TTS）の動作確認用（エディタから実行） */
+function testMultiTTS() {
+  const r = scriptTtsCore_([
+    { speaker: '健', text: 'こんばんは、ネオンウェーブ・ラジオです。' },
+    { speaker: '美奈', text: '今夜も素敵な曲を、たっぷりお届けしますね。' }
+  ], { '健': 'midnight', '美奈': 'sunset' });
+  Logger.log('segments=' + r.length + ' mimeType=' + r[0].mimeType + ' base64長=' + r[0].base64.length);
 }
 
 /* ============================================================
@@ -409,11 +491,112 @@ function publicTrack_(t) {
 }
 
 /* ============================================================
+ *  パーソナリティ
+ * ============================================================ */
+function personasAll_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('personas_all');
+  if (hit) return JSON.parse(hit);
+  const custom = readAll_('Personas').map(function (p) {
+    return {
+      id: p.id, name: p.name, icon: p.icon, color: p.color, gender: p.gender, voice: p.voice, role: p.role,
+      description: p.description, style: p.style, prompt: p.prompt, ownerId: p.ownerId, ownerName: p.ownerName,
+      createdAt: Number(p.createdAt), builtin: false
+    };
+  });
+  const list = BUILTIN_PERSONAS.map(function (p) { return Object.assign({ builtin: true, ownerId: '', ownerName: '' }, p); }).concat(custom);
+  try { cache.put('personas_all', JSON.stringify(list), PERSONA_CACHE_SEC); } catch (e) { /* 大きすぎる場合はキャッシュしない */ }
+  return list;
+}
+
+function personaGet_(id, fallbackId) {
+  const all = personasAll_();
+  const find = function (x) { return all.filter(function (p) { return p.id === x; })[0]; };
+  return find(id) || find(fallbackId) || all[0];
+}
+
+/** 台本・会話用のキャラクター指示 */
+function personaInstruction_(p) {
+  return 'あなたは「' + p.name + '」という名前のラジオパーソナリティです。' +
+    (p.role ? '役割：' + p.role + '。' : '') +
+    (p.description ? '特徴：' + p.description + '。' : '') +
+    (p.prompt ? '\n' + p.prompt : '');
+}
+
+function personasList_(req) {
+  auth_(req);
+  return { personas: personasAll_(), voices: VOICES };
+}
+
+function personaSave_(req) {
+  const user = auth_(req);
+  const d = req.persona || {};
+  const name = String(d.name || '').trim().slice(0, 20);
+  if (!name) throw apiErr_('名前を入力してください');
+  const voice = String(d.voice || '');
+  if (VOICE_NAMES.indexOf(voice) < 0) throw apiErr_('声を選んでください');
+  const color = /^#[0-9a-fA-F]{6}$/.test(String(d.color || '')) ? String(d.color) : '#7c6cff';
+  const gender = ['male', 'female', 'other'].indexOf(d.gender) >= 0 ? d.gender : 'other';
+  const icon = Array.from(String(d.icon || '🎙').trim()).slice(0, 8).join('') || '🎙';
+  const rec = {
+    name: name, icon: icon, color: color, gender: gender, voice: voice,
+    role: String(d.role || '').trim().slice(0, 40),
+    description: String(d.description || '').trim().slice(0, 120),
+    style: String(d.style || '').trim().slice(0, 300) || 'ラジオパーソナリティとして、自然で聞き取りやすく読み上げてください。',
+    prompt: String(d.prompt || '').trim().slice(0, 1500),
+    updatedAt: now_()
+  };
+  const out = withLock_(function () {
+    const rows = readAll_('Personas');
+    if (d.id) {
+      if (BUILTIN_PERSONAS.some(function (p) { return p.id === d.id; })) throw apiErr_('標準のパーソナリティは編集できません。「複製」して使ってください');
+      const row = rows.filter(function (r) { return r.id === d.id; })[0];
+      if (!row) throw apiErr_('パーソナリティが見つかりません');
+      if (row.ownerId !== user.userId && user.role !== 'admin') throw apiErr_('編集できるのは作成者か管理者だけです');
+      update_('Personas', row, rec);
+      return Object.assign({}, row, rec);
+    }
+    const mine = rows.filter(function (r) { return r.ownerId === user.userId; }).length;
+    if (mine >= MAX_CUSTOM_PERSONAS) throw apiErr_('パーソナリティは1人' + MAX_CUSTOM_PERSONAS + '件までです');
+    const full = Object.assign({ id: 'p_' + randStr_(10), ownerId: user.userId, ownerName: user.nickname, createdAt: now_() }, rec);
+    append_('Personas', full);
+    return full;
+  });
+  CacheService.getScriptCache().remove('personas_all');
+  return { persona: { id: out.id }, message: '「' + name + '」を保存しました' };
+}
+
+function personaDelete_(req) {
+  const user = auth_(req);
+  withLock_(function () {
+    const row = readAll_('Personas').filter(function (r) { return r.id === req.id; })[0];
+    if (!row) throw apiErr_('見つかりません');
+    if (row.ownerId !== user.userId && user.role !== 'admin') throw apiErr_('削除できるのは作成者か管理者だけです');
+    deleteRow_('Personas', row);
+  });
+  CacheService.getScriptCache().remove('personas_all');
+  return { message: '削除しました' };
+}
+
+/** 指定パーソナリティ（または声と話し方）で読み上げ。試聴・自分の声の変換に使う */
+function ttsSay_(req) {
+  auth_(req);
+  const text = String(req.text || '').trim().slice(0, 800);
+  if (!text) throw apiErr_('読み上げる文章がありません');
+  if (req.voice) {
+    if (VOICE_NAMES.indexOf(String(req.voice)) < 0) throw apiErr_('声の指定が正しくありません');
+    const style = String(req.style || '').trim().slice(0, 300) || 'ラジオパーソナリティとして、自然で聞き取りやすく読み上げてください。';
+    return { audio: ttsVoice_(String(req.voice), style, text) };
+  }
+  return { audio: tts_(personaGet_(req.persona, 'cafe'), text) };
+}
+
+/* ============================================================
  *  AI DJ（ラジオ放送中のトーク）
  * ============================================================ */
 function djTalk_(req) {
   const user = auth_(req);
-  const persona = PERSONAS[req.persona] ? req.persona : 'midnight';
+  const p = personaGet_(req.persona, 'midnight');
   const c = req.context || {};
   let task;
   if (c.mode === 'between') {
@@ -426,37 +609,204 @@ function djTalk_(req) {
   } else {
     task = '番組のオープニングです。リスナーの「' + safe_(user.nickname) + '」さんへの呼びかけも入れて、番組の始まりを告げてください。';
   }
-  const text = generateScript_(persona, task);
-  const audio = tts_(persona, text);
-  return { text: text, persona: persona, audio: audio };
+  const text = generateScript_(p, task);
+  const audio = tts_(p, text);
+  return { text: text, persona: p.id, audio: audio };
 }
 
-function generateScript_(persona, task) {
-  const p = PERSONAS[persona];
-  const model = prop_('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash';
+function generateScript_(p, task) {
   const body = {
-    systemInstruction: { parts: [{ text: p.prompt + '\n\n【出力ルール】\n・読み上げる台本の本文だけを出力する\n・120〜200文字程度\n・絵文字、記号、ト書き、括弧書きの演出指示、Markdownは使わない\n・番組名は「ネオンウェーブ・ラジオ」' }] },
+    systemInstruction: { parts: [{ text: personaInstruction_(p) + '\n\n【出力ルール】\n・読み上げる台本の本文だけを出力する\n・120〜200文字程度\n・絵文字、記号、ト書き、括弧書きの演出指示、Markdownは使わない\n・番組名は「ネオンウェーブ・ラジオ」' }] },
     contents: [{ role: 'user', parts: [{ text: task }] }],
-    generationConfig: { temperature: 0.9, maxOutputTokens: 512 }
+    generationConfig: { temperature: 0.9, maxOutputTokens: 1024 }
   };
-  const res = gemini_(model, body);
-  const parts = (((res.candidates || [])[0] || {}).content || {}).parts || [];
-  const text = parts.map(function (x) { return x.text || ''; }).join('').replace(/[*#`]/g, '').trim();
+  const text = cleanText_(textOf_(gemini_(textModel_(), body)));
   if (!text) throw apiErr_('AI DJ の台本を生成できませんでした');
   return text;
 }
 
-function tts_(persona, text) {
-  const p = PERSONAS[persona] || PERSONAS.midnight;
-  const model = prop_('GEMINI_TTS_MODEL') || 'gemini-3.8-flash-tts';
+/* ============================================================
+ *  台本の掛け合い
+ * ============================================================ */
+function scriptTts_(req) {
+  auth_(req);
+  const lines = (req.lines || []).map(function (l) {
+    return { speaker: String((l && l.speaker) || '').trim().slice(0, 20), text: String((l && l.text) || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 400) };
+  }).filter(function (l) { return l.speaker && l.text; });
+  if (!lines.length) throw apiErr_('台本のセリフがありません');
+  if (lines.length > 60) throw apiErr_('1ブロックのセリフは60行までです。「---」でブロックを分けてください');
+  const total = lines.reduce(function (n, l) { return n + l.text.length; }, 0);
+  if (total > 3000) throw apiErr_('1ブロックが長すぎます（3000文字まで）。「---」でブロックを分けてください');
+  return { segments: scriptTtsCore_(lines, req.cast || {}), gapMs: 250 };
+}
+
+/** 2人ずつの区間に分けて複数話者TTS（区間は並列で生成） */
+function scriptTtsCore_(lines, cast) {
+  const pmap = {};
+  lines.forEach(function (l) { if (!pmap[l.speaker]) pmap[l.speaker] = personaGet_(cast[l.speaker], 'cafe'); });
+  const segs = [];
+  let cur = [], names = [];
+  lines.forEach(function (l) {
+    if (names.indexOf(l.speaker) < 0 && names.length === 2) { segs.push({ lines: cur, names: names }); cur = []; names = []; }
+    if (names.indexOf(l.speaker) < 0) names.push(l.speaker);
+    cur.push(l);
+  });
+  if (cur.length) segs.push({ lines: cur, names: names });
+
+  const model = ttsModel_();
+  const requests = segs.map(function (seg) {
+    if (seg.names.length === 1) {
+      const p = pmap[seg.names[0]];
+      return geminiRequest_(model, ttsBody_(p.voice, p.style, seg.lines.map(function (l) { return l.text; }).join('\n')));
+    }
+    const sp = seg.names.map(function (n, i) { return { label: 'Speaker' + (i + 1), p: pmap[n] }; });
+    const head = '以下のSpeaker1とSpeaker2の会話を、ラジオ番組の掛け合いとして自然なテンポで読み上げてください。' +
+      'Speaker1の話し方は、' + sp[0].p.style + ' Speaker2の話し方は、' + sp[1].p.style;
+    const script = seg.lines.map(function (l) { return sp[seg.names.indexOf(l.speaker)].label + ': ' + l.text; }).join('\n');
+    return geminiRequest_(model, {
+      contents: [{ parts: [{ text: head + '\n\n' + script }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          multiSpeakerVoiceConfig: {
+            speakerVoiceConfigs: sp.map(function (s) {
+              return { speaker: s.label, voiceConfig: { prebuiltVoiceConfig: { voiceName: s.p.voice } } };
+            })
+          }
+        }
+      }
+    });
+  });
+  const results = UrlFetchApp.fetchAll(requests);
+  const out = [];
+  results.forEach(function (res, i) {
+    try {
+      out.push(audioOf_(parseGemini_(res)));
+    } catch (e) {
+      // 複数話者で失敗したときは、1行ずつ単独の声で作り直す
+      if (segs[i].names.length < 2 || /利用上限/.test(String(e.message))) throw e;
+      const singles = UrlFetchApp.fetchAll(segs[i].lines.map(function (l) {
+        const p = pmap[l.speaker];
+        return geminiRequest_(model, ttsBody_(p.voice, p.style, l.text));
+      }));
+      singles.forEach(function (r) { out.push(audioOf_(parseGemini_(r))); });
+    }
+  });
+  return out;
+}
+
+function scriptDraft_(req) {
+  auth_(req);
+  const cast = req.cast || [];
+  const a = personaGet_(cast[0], 'midnight'), b = personaGet_(cast[1], 'sunset');
+  const theme = safe_(req.theme) || '季節の話題と、音楽にまつわる思い出';
+  const blocks = Math.max(1, Math.min(6, Number(req.blocks) || 3));
+  const desc = function (p) {
+    return '「' + p.name + '」（' + (p.gender === 'female' ? '女性' : p.gender === 'male' ? '男性' : '') +
+      (p.role ? '・' + p.role : '') + (p.description ? '・' + p.description : '') + '）';
+  };
+  const task = desc(a) + 'と' + desc(b) + 'の2人が、ラジオ番組の曲と曲の間に話す掛け合いの台本を書いてください。\n' +
+    'テーマ：' + theme + '\n' +
+    'ブロック数：' + blocks + '（1ブロック＝曲間1回分。各ブロック4〜8行で、最初のブロックは番組のオープニング、最後のブロックはエンディング風に）\n' +
+    '【形式】各行は「名前：セリフ」。名前は必ず「' + a.name + '」か「' + b.name + '」。ブロックの間は「---」だけの行で区切る。\n' +
+    'セリフに絵文字、ト書き、括弧の演出指示、Markdownは入れない。前置きや説明は書かず、台本だけを出力する。';
   const body = {
-    contents: [{ parts: [{ text: p.style + '\n\n' + text }] }],
+    systemInstruction: { parts: [{ text: 'あなたは人気ラジオ番組のベテラン放送作家です。2人のキャラクターが生きた、テンポのよい掛け合いを書きます。\n\n' + personaInstruction_(a) + '\n\n' + personaInstruction_(b) }] },
+    contents: [{ role: 'user', parts: [{ text: task }] }],
+    generationConfig: { temperature: 0.95, maxOutputTokens: 4096 }
+  };
+  const text = textOf_(gemini_(textModel_(), body)).replace(/```[a-z]*\n?/gi, '').replace(/[*#`]/g, '').trim();
+  if (!text) throw apiErr_('台本を作れませんでした。もう一度お試しください');
+  return { text: text };
+}
+
+/* ============================================================
+ *  AIとの対話（自分の声を文字起こし → 指定の声に変換 → AIが返事）
+ * ============================================================ */
+function voiceTranscribe_(req) {
+  auth_(req);
+  const b64 = String(req.base64 || '');
+  if (!b64) throw apiErr_('音声データが空です');
+  if (b64.length * 0.75 > MAX_STT_BYTES) throw apiErr_('音声が長すぎます');
+  const mime = /^audio\/[\w.+-]+$/.test(String(req.mimeType || '')) ? String(req.mimeType) : 'audio/wav';
+  const body = {
+    contents: [{
+      role: 'user', parts: [
+        { inlineData: { mimeType: mime, data: b64 } },
+        { text: 'この音声を日本語で正確に文字起こししてください。話し言葉の雰囲気は残しつつ、「えー」「あのー」などのつなぎ言葉は省き、句読点を補ってください。文字起こしした本文だけを出力し、説明や引用符は付けないでください。人の声が入っていない場合は何も出力しないでください。' }
+      ]
+    }],
+    generationConfig: { temperature: 0, maxOutputTokens: 2048 }
+  };
+  let text = textOf_(gemini_(textModel_(), body)).replace(/^[「『"]+|[」』"]+$/g, '').trim();
+  if (/^[（(]?(無音|音声なし|発話なし|なし)[）)]?。?$/.test(text)) text = '';
+  return { text: text.slice(0, 800) };
+}
+
+function talkReply_(req) {
+  const user = auth_(req);
+  const p = personaGet_(req.persona, 'cafe');
+  const partner = safe_(req.partnerName) || user.nickname;
+  const theme = safe_(req.theme);
+  const contents = [];
+  (req.history || []).slice(-16).forEach(function (h) {
+    const role = h && h.role === 'ai' ? 'model' : 'user';
+    const t = String((h && h.text) || '').trim().slice(0, 600);
+    if (!t) return;
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) last.parts[0].text += '\n' + t;
+    else contents.push({ role: role, parts: [{ text: t }] });
+  });
+  if (!contents.length) contents.push({ role: 'user', parts: [{ text: '（番組が始まりました。あなたから最初のひとことで、' + partner + 'さんに話しかけてください）' }] });
+  if (contents[0].role === 'model') contents.unshift({ role: 'user', parts: [{ text: '（番組スタート）' }] });
+  if (contents[contents.length - 1].role === 'model') contents.push({ role: 'user', parts: [{ text: '（続けてどうぞ）' }] });
+
+  const sys = personaInstruction_(p) +
+    '\n\n【状況】ラジオ番組の収録中です。あなたは相方の「' + partner + '」さんと2人で掛け合いトークをしています。' +
+    (theme ? '今日のテーマは「' + theme + '」。' : '') +
+    '\n【出力ルール】\n・相方の発言を受けて自然に返す。共感やツッコミを入れ、ときどき質問を返して会話を広げる\n・読み上げる本文だけ。40〜140文字程度\n・絵文字、記号、ト書き、括弧の演出指示、Markdownは使わない\n・番組名は「ネオンウェーブ・ラジオ」';
+  const body = {
+    systemInstruction: { parts: [{ text: sys }] },
+    contents: contents,
+    generationConfig: { temperature: 0.9, maxOutputTokens: 1024 }
+  };
+  const text = cleanText_(textOf_(gemini_(textModel_(), body)));
+  if (!text) throw apiErr_('返事を作れませんでした。もう一度話しかけてください');
+  return { text: text, persona: p.id, audio: tts_(p, text) };
+}
+
+/* ============================================================
+ *  Gemini 共通
+ * ============================================================ */
+function textModel_() { return prop_('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash'; }
+function ttsModel_() { return prop_('GEMINI_TTS_MODEL') || 'gemini-3.8-flash-tts'; }
+
+function textOf_(res) {
+  const parts = (((res.candidates || [])[0] || {}).content || {}).parts || [];
+  return parts.filter(function (x) { return !x.thought; }).map(function (x) { return x.text || ''; }).join('').trim();
+}
+
+function cleanText_(t) { return String(t || '').replace(/[*#`]/g, '').trim(); }
+
+function ttsBody_(voice, style, text) {
+  return {
+    contents: [{ parts: [{ text: style + '\n\n' + text }] }],
     generationConfig: {
       responseModalities: ['AUDIO'],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: p.voice } } }
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } }
     }
   };
-  const res = gemini_(model, body);
+}
+
+function tts_(p, text) {
+  return ttsVoice_(p.voice, p.style, text);
+}
+
+function ttsVoice_(voice, style, text) {
+  return audioOf_(gemini_(ttsModel_(), ttsBody_(voice, style, text)));
+}
+
+function audioOf_(res) {
   const parts = (((res.candidates || [])[0] || {}).content || {}).parts || [];
   const inline = parts.filter(function (x) { return x.inlineData && x.inlineData.data; })[0];
   if (!inline) throw apiErr_('音声データを取得できませんでした');
@@ -465,17 +815,31 @@ function tts_(persona, text) {
   return { base64: inline.inlineData.data, mimeType: mime, sampleRate: m ? Number(m[1]) : 24000 };
 }
 
-function gemini_(model, body) {
+function geminiRequest_(model, body) {
   const key = prop_('GEMINI_API_KEY');
   if (!key) throw apiErr_('GEMINI_API_KEY が未設定です');
-  const res = UrlFetchApp.fetch(
-    'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
-    { method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true }
-  );
+  return {
+    url: 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
+    method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
+    payload: JSON.stringify(body), muteHttpExceptions: true
+  };
+}
+
+function parseGemini_(res) {
   const code = res.getResponseCode();
   const txt = res.getContentText();
-  if (code !== 200) throw apiErr_('Gemini API エラー(' + code + '): ' + txt.slice(0, 200));
+  if (code !== 200) {
+    if (code === 429) throw apiErr_('Gemini API の利用上限に達しました。しばらく待ってから再度お試しください');
+    throw apiErr_('Gemini API エラー(' + code + '): ' + txt.slice(0, 200));
+  }
   return JSON.parse(txt);
+}
+
+function gemini_(model, body) {
+  const r = geminiRequest_(model, body);
+  const url = r.url;
+  delete r.url;
+  return parseGemini_(UrlFetchApp.fetch(url, r));
 }
 
 /** PCM(16bit/mono) を WAV に包んで Blob 化 */
@@ -521,7 +885,7 @@ function roomCreate_(req) {
   const user = auth_(req);
   const title = String(req.title || '').trim().slice(0, 40);
   if (!title) throw apiErr_('ルーム名を入力してください');
-  const persona = PERSONAS[req.persona] ? req.persona : 'cafe';
+  const persona = personaGet_(req.persona, 'cafe').id;
   const t = now_();
   const room = { id: 'r_' + randStr_(10), title: title, topic: String(req.topic || '').trim().slice(0, 120), persona: persona,
                  hostId: user.userId, hostName: user.nickname, status: 'open', createdAt: t, updatedAt: t };
@@ -665,7 +1029,7 @@ function roomAi_(req) {
   const room = getOpenRoom_(req.roomId);
   const me = member_(req.roomId, user.userId);
   if (me.role === 'listener') throw apiErr_('AI DJ を呼べるのはステージ上のメンバーだけです');
-  const persona = PERSONAS[req.persona] ? req.persona : (room.persona || 'cafe');
+  const p = personaGet_(req.persona, room.persona || 'cafe');
   const recent = readAll_('RoomMessages')
     .filter(function (m) { return m.roomId === room.id && (m.type === 'text' || m.type === 'ai'); })
     .slice(-10)
@@ -675,12 +1039,12 @@ function roomAi_(req) {
     (room.topic ? 'テーマは「' + safe_(room.topic) + '」。' : '') +
     '\n最近のやりとり:\n' + (recent || '（まだ会話はありません）') +
     '\n\n' + safe_(user.nickname) + ' さんに呼ばれました。流れを汲んで、場を和ませるコメントや、参加者への問いかけをしてください。';
-  const text = generateScript_(persona, task);
-  const audio = tts_(persona, text);
+  const text = generateScript_(p, task);
+  const audio = tts_(p, text);
   const blob = pcmToWavBlob_(Utilities.base64Decode(audio.base64), audio.sampleRate, 'ai_' + room.id + '_' + now_() + '.wav');
   const file = folder_().createFile(blob);
   return withLock_(function () {
-    const msg = addMsg_(room.id, user, 'ai', text, file.getId(), 'audio/wav', persona);
+    const msg = addMsg_(room.id, user, 'ai', text, file.getId(), 'audio/wav', p.id);
     return { message: msg };
   });
 }

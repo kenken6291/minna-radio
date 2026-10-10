@@ -67,6 +67,7 @@
       <button class="nav-btn is-active" data-nav="radio"><span aria-hidden="true">📻</span>ラジオ</button>
       <button class="nav-btn" data-nav="podcast"><span aria-hidden="true">🎧</span>ポッドキャスト</button>
       <button class="nav-btn" data-nav="rooms"><span aria-hidden="true">🎙</span>ライブルーム</button>
+      <button class="nav-btn" data-nav="studio"><span aria-hidden="true">🎛</span>スタジオ</button>
     </nav>
     <button class="user-chip" id="userChip" aria-label="設定を開く">
       <span class="avatar" id="userAvatar"></span><span class="user-name" id="userName"></span>
@@ -103,7 +104,10 @@
             </div>
 
             <div class="dj-caption" id="djCaption" hidden>
-              <span class="dj-caption-who" id="djCaptionWho"></span>
+              <div class="dj-caption-head">
+                <span class="dj-caption-who" id="djCaptionWho"></span>
+                <button class="caption-export" id="btnSegExport" hidden>⬇ 書き出す</button>
+              </div>
               <p id="djCaptionText"></p>
             </div>
 
@@ -119,10 +123,23 @@
           <section class="panel">
             <h2 class="panel-title">AIパーソナリティ</h2>
             <div class="persona-list" id="personaList" role="radiogroup" aria-label="AIパーソナリティ"></div>
-            <div class="switch-row">
-              <label class="switch"><input type="checkbox" id="autoDj"><span class="switch-ui"></span>
-                <span>曲間にDJトークを入れる（<span id="djEveryN"></span>曲ごと）</span></label>
+            <div class="between-grid">
+              <label class="field"><span>曲間に入れる</span>
+                <select id="betweenMode">
+                  <option value="ai">AI DJ のトーク</option>
+                  <option value="script">台本の掛け合い</option>
+                  <option value="mix">台本 → 終わったら AI トーク</option>
+                  <option value="off">なし</option>
+                </select></label>
+              <label class="field"><span>タイミング</span>
+                <select id="betweenEvery">
+                  <option value="1">毎曲</option>
+                  <option value="2">2曲ごと</option>
+                  <option value="3">3曲ごと</option>
+                  <option value="5">5曲ごと</option>
+                </select></label>
             </div>
+            <p class="between-status" id="scriptStatus"></p>
           </section>
 
           <section class="panel">
@@ -211,6 +228,109 @@
           <button class="ctl" id="btnStepDown"><span class="ctl-ico">⬇</span><span class="ctl-label">リスナーに戻る</span></button>
           <label class="ctl ctl-toggle"><input type="checkbox" id="roomAutoplay" checked><span class="ctl-label">新しい音声を自動再生</span></label>
         </div>
+      </div>
+    </section>
+
+    <!-- ========== スタジオ ========== -->
+    <section id="view-studio" class="view">
+      <div class="view-head">
+        <h2 class="view-title">スタジオ</h2>
+      </div>
+      <div class="seg studio-tabs" role="tablist" aria-label="スタジオのメニュー">
+        <button class="seg-btn is-active" data-studio-tab="talk" role="tab" aria-selected="true">🎙 AIと対話</button>
+        <button class="seg-btn" data-studio-tab="script" role="tab" aria-selected="false">📝 掛け合い台本</button>
+        <button class="seg-btn" data-studio-tab="personas" role="tab" aria-selected="false">👥 パーソナリティ</button>
+      </div>
+
+      <!-- ---- AIと対話 ---- -->
+      <div class="studio-panel" data-studio-panel="talk">
+        <div class="talk-layout">
+          <aside class="panel talk-settings">
+            <h3 class="panel-title">配役</h3>
+            <label class="field"><span>あなたの声（このパーソナリティの声に変換）</span><select id="cvMe"></select></label>
+            <label class="field"><span>相手になる AI パーソナリティ</span><select id="cvAi"></select></label>
+            <label class="field"><span>トークのテーマ（任意）</span><input type="text" id="cvTheme" maxlength="80" placeholder="例：子どもの頃に聴いたラジオ"></label>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="cvConvert"><span class="switch-ui"></span><span>自分の声をパーソナリティの声に変える</span></label></div>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="cvContinuous"><span class="switch-ui"></span><span>AI が話し終えたら、続けて聞き取る</span></label></div>
+            <label class="slider-row slider-row-wide"><span>話し終わりの間 <b id="cvSilenceVal"></b> 秒</span><input type="range" id="cvSilence" min="1" max="5" step="0.5"></label>
+            <p class="hint">考えながら話して少し間があいても、ここで決めた秒数までは聞き続けます。イヤホンを使うと、AI の声をマイクが拾いにくくなります。</p>
+          </aside>
+
+          <div class="talk-booth">
+            <div class="booth-stage">
+              <div class="booth-seat" id="seatMe"></div>
+              <div class="booth-mic-wrap">
+                <button class="booth-mic" id="btnMic" aria-label="マイクで話しはじめる"><span class="booth-mic-ring" aria-hidden="true"></span><span class="booth-mic-ico" aria-hidden="true">🎙</span></button>
+                <p class="booth-status" id="micStatus" aria-live="polite">マイクを押して話しかけてください</p>
+                <button class="btn btn-small btn-ghost" id="btnMicCancel" hidden>やめる</button>
+              </div>
+              <div class="booth-seat" id="seatAi"></div>
+            </div>
+            <ol class="talk-log" id="talkLog" aria-live="polite"></ol>
+            <form class="composer" id="talkComposer">
+              <input type="text" id="talkInput" maxlength="300" placeholder="文字で話しかけることもできます" autocomplete="off">
+              <button class="btn btn-primary btn-small" type="submit">送る</button>
+            </form>
+            <div class="talk-actions">
+              <button class="btn btn-small btn-ghost" id="btnAiOpen">AI から話しはじめる</button>
+              <button class="btn btn-small btn-ghost" id="btnTalkExport">⬇ 会話を書き出す</button>
+              <button class="btn btn-small btn-ghost" id="btnTalkSave">💾 ポッドキャストに保存</button>
+              <button class="btn btn-small btn-danger" id="btnTalkClear">会話を消す</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- 掛け合い台本 ---- -->
+      <div class="studio-panel" data-studio-panel="script" hidden>
+        <div class="script-layout">
+          <section class="panel">
+            <div class="panel-head">
+              <h3 class="panel-title">台本</h3>
+              <div class="panel-tools">
+                <label class="btn btn-small btn-ghost file-btn">📄 ファイルを取り込む<input type="file" id="scriptFile" accept=".txt,text/plain" hidden></label>
+                <button class="btn btn-small btn-ghost" id="btnDraft">✨ AI で下書き</button>
+              </div>
+            </div>
+            <textarea id="scriptText" class="script-text" rows="14" spellcheck="false" placeholder="健：こんばんは、ネオンウェーブ・ラジオの時間です。&#10;美奈：今夜もよろしくお願いします。さっそく1曲目、いきましょうか。&#10;---&#10;健：いい曲でしたね。&#10;美奈：サビで思わず口ずさんじゃいました。"></textarea>
+            <details class="script-help">
+              <summary>台本の書き方</summary>
+              <ul>
+                <li>1行に1セリフ。「名前：セリフ」または「【名前】セリフ」の形で書きます。</li>
+                <li>「---」だけの行で区切ると、そこまでが曲間1回分（1ブロック）になります。</li>
+                <li>「#」で始まる行はメモとして読み飛ばします。</li>
+                <li>話す人は何人でも大丈夫。名前ごとに好きなパーソナリティの声を割り当てられます。</li>
+                <li>メモ帳で作った .txt ファイルもそのまま取り込めます。</li>
+              </ul>
+            </details>
+            <div class="panel-foot">
+              <button class="btn btn-primary btn-small" id="btnScriptParse">台本を読み込む</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h3 class="panel-title">配役</h3>
+            <ul class="cast-list" id="castList"></ul>
+            <div class="panel-head block-head-row">
+              <h3 class="panel-title">ブロック <span class="count" id="blockCount"></span></h3>
+              <div class="panel-tools">
+                <button class="btn btn-small btn-ghost" id="btnGenAll">🔊 全部の音声を作る</button>
+                <button class="btn btn-small btn-ghost" id="btnExportAllBlocks">⬇ まとめて書き出す</button>
+              </div>
+            </div>
+            <ol class="block-list" id="blockList"></ol>
+            <button class="btn btn-primary btn-block" id="btnUseScript">📻 ラジオの曲間で流す</button>
+          </section>
+        </div>
+      </div>
+
+      <!-- ---- パーソナリティ ---- -->
+      <div class="studio-panel" data-studio-panel="personas" hidden>
+        <div class="persona-studio-head">
+          <p class="hint">ラジオの DJ、台本の配役、AI との対話で使うキャラクターです。声・話し方・性格を決めて、何人でも作れます。</p>
+          <button class="btn btn-primary" id="btnNewPersona">＋ 新しいパーソナリティ</button>
+        </div>
+        <ul class="persona-grid" id="personaGrid"></ul>
       </div>
     </section>
   </main>
@@ -347,12 +467,90 @@
   </div>
 </div>
 
+<div class="modal" id="modalPersona" hidden>
+  <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-labelledby="pmTitle">
+    <h3 id="pmTitle">パーソナリティを作る</h3>
+    <form id="personaForm">
+      <input type="hidden" name="pid">
+      <div class="pm-row pm-row-id">
+        <label class="field"><span>アイコン</span><input type="text" name="icon" maxlength="8" class="pm-icon"></label>
+        <label class="field"><span>色</span><input type="color" name="color" class="pm-color"></label>
+        <label class="field pm-grow"><span>名前</span><input type="text" name="name" maxlength="20" required placeholder="例：ナイト・ミナミ"></label>
+      </div>
+      <div class="pm-row">
+        <label class="field"><span>性別</span>
+          <select name="gender"><option value="female">女性</option><option value="male">男性</option><option value="other">その他</option></select></label>
+        <label class="field pm-grow"><span>声</span><select name="voice" id="pmVoice"></select></label>
+        <button type="button" class="btn btn-small btn-ghost pm-hear" id="pmPreview">▶ 試聴</button>
+      </div>
+      <label class="field"><span>役割（任意）</span><input type="text" name="prole" maxlength="40" placeholder="例：深夜番組のパーソナリティ"></label>
+      <label class="field"><span>ひとこと紹介（任意）</span><input type="text" name="description" maxlength="120" placeholder="例：昭和歌謡にくわしい、聞き上手なお姉さん"></label>
+      <label class="field"><span>話し方（読み上げの指示）</span><textarea name="pstyle" rows="2" maxlength="300" placeholder="例：落ち着いた声で、ゆっくり、やさしく語りかけるように読み上げてください。"></textarea></label>
+      <label class="field"><span>キャラクター設定（トークの内容・性格）</span><textarea name="prompt" rows="4" maxlength="1500" placeholder="例：60代の元レコード店主。音楽の思い出話が大好きで、相手の話にはまず共感してから、自分の体験を少しだけ添えます。"></textarea></label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+        <button type="submit" class="btn btn-primary">保存する</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="modalExport" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="exTitle">
+    <h3 id="exTitle">音声ファイルに書き出す</h3>
+    <p class="ex-target" id="exTarget"></p>
+    <form id="exportForm">
+      <label class="field"><span>ファイル形式</span><select name="format" id="exFormat"></select></label>
+      <div class="ex-grid">
+        <label class="field" id="exDepthWrap"><span>ビット深度</span>
+          <select name="bitDepth"><option value="16">16bit（CD 品質）</option><option value="24">24bit（高解像度）</option></select></label>
+        <label class="field" id="exRateWrap"><span>ビットレート</span>
+          <select name="bitrate"><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></label>
+        <label class="field"><span>サンプルレート</span>
+          <select name="sampleRate"><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option><option value="32000">32 kHz</option><option value="24000">24 kHz</option></select></label>
+        <label class="field"><span>チャンネル</span>
+          <select name="channels"><option value="2">ステレオ</option><option value="1">モノラル</option></select></label>
+      </div>
+      <p class="hint" id="exNote"></p>
+      <div class="ex-progress" id="exProgress" hidden>
+        <div class="ex-bar"><span id="exBar"></span></div>
+        <p id="exStep"></p>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>閉じる</button>
+        <button type="submit" class="btn btn-primary" id="exSubmit">書き出す</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="modalDraft" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dfTitle">
+    <h3 id="dfTitle">AI で台本を下書き</h3>
+    <form id="draftForm">
+      <div class="ex-grid">
+        <label class="field"><span>1人目</span><select name="a" id="dfA"></select></label>
+        <label class="field"><span>2人目</span><select name="b" id="dfB"></select></label>
+      </div>
+      <label class="field"><span>テーマ</span><input type="text" name="theme" maxlength="80" placeholder="例：秋の夜長に聴きたい曲の思い出"></label>
+      <label class="field"><span>ブロック数（曲間の回数）</span>
+        <select name="blocks"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label>
+      <p class="hint">できあがった台本は自由に書き直せます。</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+        <button type="submit" class="btn btn-primary">下書きを作る</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <audio id="musicEl" preload="auto" playsinline></audio>
 <audio id="rawEl" preload="auto" playsinline></audio>
 
 <script src="config.js"></script>
+<script src="encoder.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

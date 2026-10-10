@@ -1,6 +1,7 @@
 /**
- * NEON WAVE RADIO - app.js  v1.0.0
+ * NEON WAVE RADIO - app.js  v1.1.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
+ * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  */
 'use strict';
 (() => {
@@ -80,12 +81,20 @@
     currentSource: null,    // drive | url | youtube
     seeking: false,
     persona: 'midnight',
-    autoDj: true,
+    between: { mode: 'ai', every: CONFIG.DJ_EVERY_N_TRACKS },   // mode: ai | script | mix | off
     fx: { lofi: true, echo: 0.15, reverb: 0.25 },
     volume: 0.8,
     djBusy: false,
-    djPrefetch: null,
-    room: null
+    segPrefetch: null,
+    lastSegment: null,
+    room: null,
+    personas: [],
+    voices: [],
+    script: { text: '', cast: {}, blocks: [], next: 0 },
+    convo: { me: '', ai: '', theme: '', silence: CONFIG.CONVO_SILENCE_SEC, convert: true, continuous: true, turns: [], busy: false },
+    exportPrefs: Object.assign({}, CONFIG.EXPORT_DEFAULT),
+    view: 'radio',
+    studioTab: 'talk'
   };
 
   const musicEl = $('#musicEl');
@@ -95,8 +104,25 @@
   function loadPrefs() {
     try {
       const p = JSON.parse(localStorage.getItem(CONFIG.PREFS_KEY) || '{}');
-      if (p.persona && CONFIG.PERSONAS.some((x) => x.id === p.persona)) state.persona = p.persona;
-      if (typeof p.autoDj === 'boolean') state.autoDj = p.autoDj;
+      if (p.persona) state.persona = String(p.persona);
+      if (typeof p.autoDj === 'boolean' && !p.autoDj) state.between.mode = 'off';   // v1.0 からの引き継ぎ
+      if (p.between) {
+        if (['ai', 'script', 'mix', 'off'].includes(p.between.mode)) state.between.mode = p.between.mode;
+        if ([1, 2, 3, 5].includes(Number(p.between.every))) state.between.every = Number(p.between.every);
+      }
+      if (p.script) {
+        state.script.text = String(p.script.text || '');
+        state.script.cast = p.script.cast && typeof p.script.cast === 'object' ? p.script.cast : {};
+        state.script.blocks = parseScript(state.script.text);
+      }
+      if (p.convo) {
+        ['me', 'ai', 'theme'].forEach((k) => { if (typeof p.convo[k] === 'string') state.convo[k] = p.convo[k]; });
+        if (typeof p.convo.convert === 'boolean') state.convo.convert = p.convo.convert;
+        if (typeof p.convo.continuous === 'boolean') state.convo.continuous = p.convo.continuous;
+        const sl = Number(p.convo.silence);
+        if (sl >= 1 && sl <= 5) state.convo.silence = sl;
+      }
+      if (p.exportPrefs && NWRExport.FORMATS[p.exportPrefs.format]) state.exportPrefs = Object.assign(state.exportPrefs, p.exportPrefs);
       if (p.fx) state.fx = Object.assign(state.fx, p.fx);
       if (typeof p.volume === 'number') state.volume = p.volume;
       if (typeof p.shuffle === 'boolean') state.shuffle = p.shuffle;
@@ -106,8 +132,14 @@
   function savePrefs() {
     try {
       localStorage.setItem(CONFIG.PREFS_KEY, JSON.stringify({
-        persona: state.persona, autoDj: state.autoDj, fx: state.fx,
-        volume: state.volume, shuffle: state.shuffle, loop: state.loop
+        persona: state.persona, between: state.between, fx: state.fx,
+        volume: state.volume, shuffle: state.shuffle, loop: state.loop,
+        script: { text: state.script.text, cast: state.script.cast },
+        convo: {
+          me: state.convo.me, ai: state.convo.ai, theme: state.convo.theme, silence: state.convo.silence,
+          convert: state.convo.convert, continuous: state.convo.continuous
+        },
+        exportPrefs: state.exportPrefs
       }));
     } catch (e) { /* noop */ }
   }
@@ -277,6 +309,7 @@
   }
 
   function forceLogout(msg) {
+    micStop('cancel');
     stopAll();
     setPlaying(false);
     if (state.room) exitRoomLocal();
@@ -308,9 +341,10 @@
     renderUser();
     if (state.appStarted) return;
     state.appStarted = true;
+    loadPersonas();
     loadTracks();
     const hash = location.hash.replace('#', '');
-    showView(['radio', 'podcast', 'rooms'].includes(hash) ? hash : 'radio');
+    showView(VIEWS.includes(hash) ? hash : 'radio');
   }
 
   /* =========================================================
@@ -701,7 +735,7 @@
       if (token === state.loadToken) setLoading(false);
     }
     updateMediaSession(t);
-    maybePrefetchDj();
+    maybePrefetchSegment();
   }
 
   function playList(list, start = 0) {
@@ -709,7 +743,7 @@
     unlockMedia();
     state.queue = list.slice();
     state.playedCount = 0;
-    state.djPrefetch = null;
+    state.segPrefetch = null;
     loadTrack(start);
   }
 
@@ -763,13 +797,17 @@
       toast('プレイリストを最後まで再生しました');
       return;
     }
-    if (state.autoDj && state.playedCount % CONFIG.DJ_EVERY_N_TRACKS === 0) {
-      const pf = state.djPrefetch;
-      const promise = pf && pf.fromIdx === state.idx && pf.toIdx === n ? pf.promise : requestBetweenTalk(state.idx, n);
-      state.djPrefetch = null;
-      const token = state.loadToken;
-      await performDj(promise, false);
-      if (token !== state.loadToken) return; // DJ中に別の曲が選ばれた
+    if (state.between.mode !== 'off' && state.playedCount % state.between.every === 0) {
+      const plan = pickBetween();
+      if (plan) {
+        const key = planKey(plan, state.idx, n);
+        const pf = state.segPrefetch;
+        const promise = pf && pf.key === key ? pf.promise : requestSegment(plan, betweenCtx(state.idx, n));
+        state.segPrefetch = null;
+        const token = state.loadToken;
+        await performSegment(promise, false);
+        if (token !== state.loadToken) return; // トーク中に別の曲が選ばれた
+      }
     }
     loadTrack(n);
   }
@@ -882,7 +920,7 @@
     $('#pShuffle').addEventListener('click', () => {
       state.shuffle = !state.shuffle;
       if (state.idx >= 0) state.plannedNext = computeNext();
-      state.djPrefetch = null;
+      state.segPrefetch = null;
       renderShuffleLoop();
       savePrefs();
       toast(state.shuffle ? 'シャッフル：オン' : 'シャッフル：オフ');
@@ -933,71 +971,146 @@
   }
 
   /* =========================================================
-   *  AI DJ
+   *  AIパーソナリティ（一覧はサーバーから読み込み）
    * ========================================================= */
-  const personaById = (id) => CONFIG.PERSONAS.find((p) => p.id === id) || CONFIG.PERSONAS[0];
+  const FALLBACK_PERSONA = { id: '', name: 'AI パーソナリティ', icon: '🎙', color: '#7c6cff', gender: 'other', voice: '', role: '', description: '' };
+  const GENDER_LABEL = { male: '男性', female: '女性', other: 'その他' };
+  const personaById = (id) => state.personas.find((p) => p.id === id) || Object.assign({}, FALLBACK_PERSONA, { id: id || '' });
+  const hasPersona = (id) => state.personas.some((p) => p.id === id);
+  const personaOptions = (selected) => state.personas.map((p) =>
+    `<option value="${esc(p.id)}"${p.id === selected ? ' selected' : ''}>${esc(p.icon)} ${esc(p.name)}（${GENDER_LABEL[p.gender] || 'その他'}）</option>`).join('');
 
-  function renderPersonas() {
-    $('#personaList').innerHTML = CONFIG.PERSONAS.map((p) => `
-      <button class="persona" role="radio" aria-checked="${p.id === state.persona}" data-persona="${p.id}" style="--pc:${p.color}">
-        <span class="persona-ico" aria-hidden="true">${p.icon}</span>
-        <span><span class="persona-name">${esc(p.name)}</span><span class="persona-desc">${esc(p.role)}｜${esc(p.desc)}</span></span>
-      </button>`).join('');
-    const opts = CONFIG.PERSONAS.map((p) => `<option value="${p.id}">${p.icon} ${esc(p.name)}</option>`).join('');
-    $('#crPersona').innerHTML = opts;
-    $('#roomPersona').innerHTML = opts;
+  async function loadPersonas() {
+    try {
+      const d = await api('personas_list');
+      state.personas = d.personas || [];
+      state.voices = d.voices || [];
+    } catch (e) {
+      toast(e.message, true);
+    }
+    fixPersonaPrefs();
+    renderPersonas();
+    renderStudioSelects();
+    renderPersonaGrid();
+    renderCast();
+    renderBlocks();
+    renderSeats();
   }
 
-  function showCaption(p, text, loading) {
+  function fixPersonaPrefs() {
+    if (!state.personas.length) return;
+    const first = state.personas[0].id;
+    const pick = (id, fb) => (hasPersona(id) ? id : hasPersona(fb) ? fb : first);
+    state.persona = pick(state.persona, 'midnight');
+    state.convo.me = pick(state.convo.me, 'cafe');
+    state.convo.ai = pick(state.convo.ai, 'sunset');
+    if (state.script.blocks.length) state.script.cast = autoCast(scriptSpeakers());
+  }
+
+  function renderPersonas() {
+    const list = state.personas;
+    $('#personaList').innerHTML = list.length ? list.map((p) => `
+      <button class="persona" role="radio" aria-checked="${p.id === state.persona}" data-persona="${esc(p.id)}" style="--pc:${esc(p.color)}">
+        <span class="persona-ico" aria-hidden="true">${esc(p.icon)}</span>
+        <span><span class="persona-name">${esc(p.name)}</span><span class="persona-desc">${esc(p.role || GENDER_LABEL[p.gender] || '')}${p.description ? '｜' + esc(p.description) : ''}</span></span>
+      </button>`).join('') : '<p class="empty">読み込み中…</p>';
+    const opts = personaOptions(state.persona);
+    $('#crPersona').innerHTML = opts;
+    $('#roomPersona').innerHTML = opts;
+    if (state.room && state.room.info) $('#roomPersona').value = state.room.info.persona;
+  }
+
+  function showCaption(who, text, loading) {
     const box = $('#djCaption');
     box.hidden = false;
     box.classList.toggle('is-loading', !!loading);
-    $('#djCaptionWho').textContent = `${p.icon} ${p.name}`;
+    $('#djCaptionWho').textContent = who;
     $('#djCaptionText').textContent = text;
+    $('#btnSegExport').hidden = !!loading || !state.lastSegment;
   }
 
-  function requestBetweenTalk(fromIdx, toIdx) {
+  /* =========================================================
+   *  曲間トーク（AI DJ ／ 台本の掛け合い）
+   * ========================================================= */
+  function scriptRemaining() { return state.script.blocks.length - state.script.next; }
+
+  /** 次の曲間に何を流すか */
+  function pickBetween() {
+    const m = state.between.mode;
+    if ((m === 'script' || m === 'mix') && scriptRemaining() > 0) return { kind: 'script', block: state.script.next };
+    if (m === 'ai' || m === 'mix') return { kind: 'ai' };
+    return null;
+  }
+  const planKey = (plan, from, to) => `${plan.kind}:${plan.block == null ? '' : plan.block}:${from}:${to}`;
+
+  function betweenCtx(fromIdx, toIdx) {
     const a = state.queue[fromIdx] || {}, b = state.queue[toIdx] || {};
-    const p = api('dj_talk', {
-      persona: state.persona,
-      context: {
-        mode: 'between',
-        prevTitle: a.title, prevArtist: a.kind === 'podcast' ? a.showName : a.artist,
-        nextTitle: b.title, nextArtist: b.kind === 'podcast' ? b.showName : b.artist,
-        nextAi: !!b.aiGenerated
-      }
-    });
+    return {
+      mode: 'between',
+      prevTitle: a.title, prevArtist: a.kind === 'podcast' ? a.showName : a.artist,
+      nextTitle: b.title, nextArtist: b.kind === 'podcast' ? b.showName : b.artist,
+      nextAi: !!b.aiGenerated
+    };
+  }
+
+  async function aiSegment(r) {
+    const buffer = await audioToBuffer(r.audio);
+    const p = personaById(r.persona);
+    return { buffer, who: `${p.icon} ${p.name}`, text: r.text, title: `${p.name}のトーク`, artist: p.name, lcd: `${p.name} ON AIR` };
+  }
+
+  async function blockSegment(i) {
+    const b = state.script.blocks[i];
+    if (!b) throw new Error('台本のブロックが見つかりません');
+    const buffer = await getBlockBuffer(b);
+    return {
+      buffer, who: `🎙 ${castLabel(b)}`, text: blockText(b),
+      title: `掛け合い ${i + 1}`, artist: castLabel(b), lcd: '掛け合いトーク ON AIR', blockIndex: i
+    };
+  }
+
+  function requestSegment(plan, ctxInfo) {
+    const p = plan.kind === 'script'
+      ? blockSegment(plan.block)
+      : api('dj_talk', { persona: state.persona, context: ctxInfo }).then(aiSegment);
     p.catch(() => {});
     return p;
   }
 
-  /** 次の曲が終わったときにDJが入る予定なら、台本と音声を先に作っておく */
-  function maybePrefetchDj() {
-    if (!state.autoDj || state.plannedNext == null || state.loop === 'one') return;
-    if ((state.playedCount + 1) % CONFIG.DJ_EVERY_N_TRACKS !== 0) return;
-    if (state.djPrefetch && state.djPrefetch.fromIdx === state.idx && state.djPrefetch.toIdx === state.plannedNext) return;
-    state.djPrefetch = { fromIdx: state.idx, toIdx: state.plannedNext, promise: requestBetweenTalk(state.idx, state.plannedNext) };
+  /** 次の曲が終わったときにトークが入る予定なら、音声を先に作っておく */
+  function maybePrefetchSegment() {
+    if (state.between.mode === 'off' || state.plannedNext == null || state.loop === 'one') return;
+    if ((state.playedCount + 1) % state.between.every !== 0) return;
+    const plan = pickBetween();
+    if (!plan) return;
+    const key = planKey(plan, state.idx, state.plannedNext);
+    if (state.segPrefetch && state.segPrefetch.key === key) return;
+    state.segPrefetch = { key, promise: requestSegment(plan, betweenCtx(state.idx, state.plannedNext)) };
   }
 
-  async function performDj(promise, overMusic) {
+  async function performSegment(promise, overMusic, loadingWho) {
     if (state.djBusy) return;
     state.djBusy = true;
     setOnAir(true);
-    const p = personaById(state.persona);
-    showCaption(p, 'トークを準備しています…', true);
+    showCaption(loadingWho || '🎙 ON AIR', 'トークを準備しています…', true);
     $('#btnCallDj').disabled = true;
     try {
-      const r = await promise;
-      const buf = await audioToBuffer(r.audio);
-      showCaption(personaById(r.persona), r.text, false);
-      setLcd(`${personaById(r.persona).name} ON AIR`);
+      const seg = await promise;
+      state.lastSegment = seg;
+      showCaption(seg.who, seg.text, false);
+      setLcd(seg.lcd);
+      if (seg.blockIndex != null) {
+        state.script.next = Math.max(state.script.next, seg.blockIndex + 1);
+        renderScriptStatus();
+        renderBlocks();
+      }
       if (overMusic) duck(true);
       await playJingle();
-      await playVoiceBuffer(buf);
+      await playVoiceBuffer(seg.buffer);
       await sleep(350);
     } catch (e) {
-      showCaption(p, 'トークを用意できませんでした：' + e.message, true);
-      toast('AI DJ：' + e.message, true);
+      showCaption('🎙 ON AIR', 'トークを用意できませんでした：' + e.message, true);
+      toast('トーク：' + e.message, true);
     } finally {
       if (overMusic) duck(false);
       state.djBusy = false;
@@ -1010,11 +1123,11 @@
 
   function callDjNow() {
     unlockMedia();
-    if (state.djBusy) { toast('DJ がしゃべっている最中です'); return; }
+    if (state.djBusy) { toast('トークの最中です'); return; }
     const cur = state.queue[state.idx];
     const ctxInfo = state.playing && cur ? { mode: 'nowplaying', nowTitle: cur.title } : { mode: 'opening' };
-    const p = api('dj_talk', { persona: state.persona, context: ctxInfo });
-    performDj(p, state.playing);
+    const p = personaById(state.persona);
+    performSegment(requestSegment({ kind: 'ai' }, ctxInfo), state.playing, `${p.icon} ${p.name}`);
   }
 
   async function startRadio() {
@@ -1028,11 +1141,29 @@
     const start = state.shuffle ? Math.floor(Math.random() * songs.length) : 0;
     state.queue = songs;
     state.playedCount = 0;
-    state.djPrefetch = null;
-    if (state.autoDj && !state.djBusy) {
-      await performDj(api('dj_talk', { persona: state.persona, context: { mode: 'opening' } }), false);
+    state.segPrefetch = null;
+    state.script.next = 0;
+    renderScriptStatus();
+    renderBlocks();
+    if (state.between.mode !== 'off' && !state.djBusy) {
+      const plan = pickBetween();
+      if (plan) await performSegment(requestSegment(plan, { mode: 'opening' }), false);
     }
     loadTrack(start);
+  }
+
+  function renderScriptStatus() {
+    const el = $('#scriptStatus');
+    if (!el) return;
+    const n = state.script.blocks.length;
+    const m = state.between.mode;
+    if (m === 'off') { el.textContent = '曲間には何も入れません'; return; }
+    if (m === 'ai') { el.textContent = `${personaById(state.persona).name} が${state.between.every === 1 ? '毎曲' : state.between.every + '曲ごとに'}しゃべります`; return; }
+    if (!n) { el.textContent = '台本がまだありません。スタジオの「掛け合い台本」で取り込めます'; return; }
+    const rest = scriptRemaining();
+    el.textContent = rest > 0
+      ? `台本 ${n} ブロック中、次は ${state.script.next + 1} 番目を流します`
+      : (m === 'mix' ? '台本はすべて流しました。この先は AI DJ がしゃべります' : '台本はすべて流しました（放送をはじめ直すと最初から）');
   }
 
   function bindDj() {
@@ -1041,19 +1172,30 @@
       const b = e.target.closest('[data-persona]');
       if (!b) return;
       state.persona = b.dataset.persona;
-      state.djPrefetch = null;
+      state.segPrefetch = null;
       renderPersonas();
+      renderScriptStatus();
       savePrefs();
-      maybePrefetchDj();
+      maybePrefetchSegment();
     });
-    const auto = $('#autoDj');
-    auto.checked = state.autoDj;
-    auto.addEventListener('change', () => {
-      state.autoDj = auto.checked;
+    const mode = $('#betweenMode'), every = $('#betweenEvery');
+    mode.value = state.between.mode;
+    every.value = String(state.between.every);
+    mode.addEventListener('change', () => {
+      state.between.mode = mode.value;
+      state.segPrefetch = null;
       savePrefs();
-      if (state.autoDj) maybePrefetchDj(); else state.djPrefetch = null;
+      renderScriptStatus();
+      maybePrefetchSegment();
     });
-    $('#djEveryN').textContent = CONFIG.DJ_EVERY_N_TRACKS;
+    every.addEventListener('change', () => {
+      state.between.every = Number(every.value);
+      state.segPrefetch = null;
+      savePrefs();
+      renderScriptStatus();
+      maybePrefetchSegment();
+    });
+    renderScriptStatus();
 
     const lofi = $('#fxLofi'), echo = $('#fxEcho'), rev = $('#fxReverb');
     lofi.checked = state.fx.lofi;
@@ -1067,6 +1209,11 @@
     $('#btnJingle').addEventListener('click', () => { unlockMedia(); playJingle(); });
     $('#btnStartRadio').addEventListener('click', startRadio);
     $('#btnCallDj').addEventListener('click', callDjNow);
+    $('#btnSegExport').addEventListener('click', () => {
+      const seg = state.lastSegment;
+      if (!seg) return;
+      openExport({ title: seg.title, artist: seg.artist, mono: true, getBuffer: async () => seg.buffer });
+    });
   }
 
   /* =========================================================
@@ -1099,6 +1246,7 @@
         </div>
         <div class="track-actions">
           <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
+          ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
           ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
         </div>
       </li>`;
@@ -1155,9 +1303,9 @@
     if (state.idx < 0) { playList([t], 0); return; }
     state.queue.splice(state.idx + 1, 0, t);
     state.plannedNext = state.idx + 1;
-    state.djPrefetch = null;
+    state.segPrefetch = null;
     renderQueue();
-    maybePrefetchDj();
+    maybePrefetchSegment();
     toast(`「${t.title}」を次に再生します`);
   }
 
@@ -1179,6 +1327,8 @@
       if (nx) { unlockMedia(); addNext(nx.dataset.next); return; }
       const del = e.target.closest('[data-del]');
       if (del) { deleteTrack(del.dataset.del); return; }
+      const ex = e.target.closest('[data-export]');
+      if (ex) { exportTrack(ex.dataset.export); return; }
       const add = e.target.closest('[data-add-kind]');
       if (add) openAddTrack(add.dataset.addKind);
     });
@@ -1655,7 +1805,11 @@
   /* =========================================================
    *  画面切り替え・モーダル・設定
    * ========================================================= */
+  const VIEWS = ['radio', 'podcast', 'rooms', 'studio'];
+
   function showView(name) {
+    if (state.view === 'studio' && name !== 'studio') leaveTalk();
+    state.view = name;
     $$('.view').forEach((v) => v.classList.toggle('is-active', v.id === 'view-' + name));
     $$('.nav-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.nav === name));
     if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
@@ -1714,6 +1868,998 @@
   }
 
   /* =========================================================
+   *  音声キャッシュ（IndexedDB：台本の音声を保存して API 呼び出しを節約）
+   * ========================================================= */
+  const idb = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      if (!window.indexedDB) { rej(new Error('no idb')); return; }
+      const r = indexedDB.open('nwr_audio', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('tts');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+    const run = (mode, fn) => open().then((db) => new Promise((res, rej) => {
+      const t = db.transaction('tts', mode);
+      const q = fn(t.objectStore('tts'));
+      t.oncomplete = () => res(q ? q.result : undefined);
+      t.onerror = () => rej(t.error);
+    }));
+    return {
+      get: (k) => run('readonly', (s) => s.get(k)).catch(() => null),
+      set: (k, v) => run('readwrite', (s) => s.put(v, k)).catch(() => null),
+      has: (k) => run('readonly', (s) => s.getKey(k)).then((x) => x !== undefined && x !== null).catch(() => false)
+    };
+  })();
+
+  /* =========================================================
+   *  音声バッファの加工
+   * ========================================================= */
+  function offlineCtx(nch, length, rate) {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    return new OAC(nch, Math.max(1, length), rate);
+  }
+
+  /** 指定サンプルレートでデコード */
+  function decodeAt(arrayBuffer, rate) {
+    const oc = offlineCtx(2, 1, rate);
+    return new Promise((res, rej) => oc.decodeAudioData(arrayBuffer, res, rej));
+  }
+
+  /** サンプルレート・チャンネル数をそろえる */
+  async function renderTo(buf, rate, nch) {
+    if (buf.sampleRate === rate && buf.numberOfChannels === nch) {
+      return [...Array(nch)].map((_, c) => buf.getChannelData(c));
+    }
+    const oc = offlineCtx(nch, Math.ceil(buf.duration * rate), rate);
+    const s = oc.createBufferSource();
+    s.buffer = buf;
+    s.connect(oc.destination);
+    s.start();
+    const out = await oc.startRendering();
+    return [...Array(nch)].map((_, c) => out.getChannelData(c));
+  }
+
+  /** 複数のバッファを間（秒）をあけて1本につなぐ */
+  async function joinBuffers(bufs, gapSec = 0.3) {
+    bufs = bufs.filter(Boolean);
+    if (!bufs.length) throw new Error('つなぐ音声がありません');
+    const rate = Math.max(...bufs.map((b) => b.sampleRate));
+    const nch = Math.max(...bufs.map((b) => b.numberOfChannels));
+    const gap = Math.round(gapSec * rate);
+    const sameRate = bufs.every((b) => b.sampleRate === rate && b.numberOfChannels === nch);
+    if (sameRate) {
+      const len = bufs.reduce((n, b) => n + b.length, 0) + gap * (bufs.length - 1);
+      const out = ensureAudio().createBuffer(nch, len, rate);
+      for (let c = 0; c < nch; c++) {
+        const dst = out.getChannelData(c);
+        let off = 0;
+        bufs.forEach((b) => { dst.set(b.getChannelData(c), off); off += b.length + gap; });
+      }
+      return out;
+    }
+    const total = bufs.reduce((n, b) => n + b.duration, 0) + gapSec * (bufs.length - 1);
+    const oc = offlineCtx(nch, Math.ceil(total * rate), rate);
+    let t = 0;
+    bufs.forEach((b) => {
+      const s = oc.createBufferSource();
+      s.buffer = b;
+      s.connect(oc.destination);
+      s.start(t);
+      t += b.duration + gapSec;
+    });
+    return oc.startRendering();
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+  const safeFileName = (s) => String(s || 'audio').replace(/[\\/:*?"<>|\r\n]+/g, '_').trim().slice(0, 60) || 'audio';
+  const stamp = () => {
+    const d = new Date();
+    const z = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}${z(d.getMinutes())}`;
+  };
+
+  /* =========================================================
+   *  書き出し（MP3 / WAV / FLAC / ALAC / AIFF）
+   * ========================================================= */
+  const EXPORT_NOTES = {
+    mp3: 'ファイルが小さく、ほぼすべての機器で再生できます。',
+    wav: 'もっとも互換性の高い非圧縮形式です。ファイルは大きめです。',
+    flac: '音質そのままでサイズを小さくできる可逆圧縮。Android・Windows・多くのプレーヤーで再生できます。',
+    alac: 'iPhone・Mac・ミュージックアプリ向けのロスレス形式（.m4a）。音質そのままですが、サイズは WAV と同じくらいです。',
+    aiff: 'Mac や音楽制作ソフト向けの非圧縮形式です。'
+  };
+  let exportJob = null;
+
+  function openExport(job) {
+    exportJob = job;
+    const f = $('#exportForm');
+    const p = state.exportPrefs;
+    f.format.value = p.format;
+    f.bitDepth.value = String(p.bitDepth);
+    f.bitrate.value = String(p.bitrate);
+    f.sampleRate.value = String(p.sampleRate);
+    f.channels.value = String(job.mono ? 1 : p.channels);
+    $('#exTarget').textContent = job.title;
+    $('#exProgress').hidden = true;
+    $('#exSubmit').disabled = false;
+    updateExportForm();
+    openModal('modalExport');
+  }
+
+  function updateExportForm() {
+    const f = $('#exportForm');
+    const fmt = NWRExport.FORMATS[f.format.value];
+    const depths = fmt.bitDepths || [];
+    $('#exDepthWrap').hidden = !depths.length;
+    [...f.bitDepth.options].forEach((o) => { o.disabled = !depths.includes(Number(o.value)); });
+    if (depths.length && !depths.includes(Number(f.bitDepth.value))) f.bitDepth.value = String(depths[0]);
+    $('#exRateWrap').hidden = f.format.value !== 'mp3';
+    $('#exNote').textContent = EXPORT_NOTES[f.format.value] || '';
+  }
+
+  function setExportStep(text, ratio) {
+    $('#exProgress').hidden = false;
+    $('#exStep').textContent = text;
+    if (ratio != null) $('#exBar').style.width = Math.round(Math.max(0, Math.min(1, ratio)) * 100) + '%';
+  }
+
+  async function submitExport(e) {
+    e.preventDefault();
+    const job = exportJob;
+    if (!job) return;
+    const f = e.target;
+    const prefs = {
+      format: f.format.value, bitDepth: Number(f.bitDepth.value), bitrate: Number(f.bitrate.value),
+      sampleRate: Number(f.sampleRate.value), channels: Number(f.channels.value)
+    };
+    if (!job.mono) state.exportPrefs = Object.assign({}, prefs);
+    else state.exportPrefs = Object.assign({}, prefs, { channels: state.exportPrefs.channels });
+    savePrefs();
+    const btn = $('#exSubmit');
+    btn.disabled = true;
+    const modal = $('#modalExport');
+    modal.dataset.locked = '1';
+    try {
+      setExportStep('音声を準備しています…', 0.02);
+      const src = await job.getBuffer(prefs.sampleRate);
+      setExportStep('音声を整えています…', 0.08);
+      const chans = await renderTo(src, prefs.sampleRate, prefs.channels);
+      setExportStep('ファイルに変換しています…', 0.1);
+      const blob = await NWRExport.encode(prefs.format, {
+        channels: chans, sampleRate: prefs.sampleRate, bitDepth: prefs.bitDepth, bitrate: prefs.bitrate,
+        tags: { title: job.title, artist: job.artist || CONFIG.APP_NAME }
+      }, (r) => setExportStep('ファイルに変換しています…', 0.1 + r * 0.9));
+      const ext = NWRExport.FORMATS[prefs.format].ext;
+      downloadBlob(blob, `${safeFileName(job.title)}.${ext}`);
+      setExportStep(`完成しました（${(blob.size / 1048576).toFixed(1)}MB）`, 1);
+      toast('書き出しました');
+      modal.dataset.locked = '';
+      setTimeout(() => { if (exportJob === job) closeModal('modalExport'); }, 900);
+    } catch (err) {
+      setExportStep('書き出せませんでした：' + err.message);
+      toast(err.message || '書き出せませんでした', true);
+    } finally {
+      modal.dataset.locked = '';
+      btn.disabled = false;
+    }
+  }
+
+  function exportTrack(id) {
+    const t = state.tracks.find((x) => x.id === id);
+    if (!t) return;
+    openExport({
+      title: t.title,
+      artist: t.kind === 'podcast' ? t.showName : t.artist,
+      getBuffer: async (rate) => {
+        let ab;
+        if (t.source === 'drive') {
+          const d = await api('audio_get', { fileId: t.fileId });
+          ab = b64ToBytes(d.base64).buffer;
+        } else if (t.source === 'url') {
+          try {
+            const r = await fetch(t.url);
+            if (!r.ok) throw new Error();
+            ab = await r.arrayBuffer();
+          } catch (e) {
+            throw new Error('外部サイトの制限で、この曲は書き出せません');
+          }
+        } else {
+          throw new Error('YouTube の曲は書き出せません');
+        }
+        try { return await decodeAt(ab, rate); } catch (e) { throw new Error('この音声はブラウザで読み込めませんでした'); }
+      }
+    });
+  }
+
+  function bindExport() {
+    const sel = $('#exFormat');
+    sel.innerHTML = Object.entries(NWRExport.FORMATS).map(([k, f]) => `<option value="${k}">${esc(f.label)}</option>`).join('');
+    sel.addEventListener('change', updateExportForm);
+    $('#exportForm').addEventListener('submit', submitExport);
+  }
+
+  /* =========================================================
+   *  パーソナリティ管理（スタジオ）
+   * ========================================================= */
+  const canEditPersona = (p) => !p.builtin && state.user && (p.ownerId === state.user.userId || state.user.role === 'admin');
+  const voiceInfo = (name) => state.voices.find((v) => v.name === name);
+  const voiceLabel = (name) => { const v = voiceInfo(name); return v ? `${name}（${v.desc}）` : name || '—'; };
+  const previewCache = new Map();
+
+  function renderPersonaGrid() {
+    const ul = $('#personaGrid');
+    if (!ul) return;
+    ul.innerHTML = state.personas.length ? state.personas.map((p) => `
+      <li class="pcard" style="--pc:${esc(p.color)}">
+        <div class="pcard-head">
+          <span class="pcard-ico" aria-hidden="true">${esc(p.icon)}</span>
+          <div class="pcard-id">
+            <h4>${esc(p.name)}</h4>
+            <p>${esc(GENDER_LABEL[p.gender] || 'その他')}／声：${esc(voiceLabel(p.voice))}</p>
+          </div>
+        </div>
+        <p class="pcard-role">${esc(p.role || '')}${p.description ? '｜' + esc(p.description) : ''}</p>
+        <p class="pcard-owner">${p.builtin ? '標準のパーソナリティ' : esc(p.ownerName || '') + ' さんが作成'}</p>
+        <div class="pcard-actions">
+          <button class="btn btn-small btn-ghost" data-pa="hear" data-id="${esc(p.id)}">▶ 声を聞く</button>
+          ${canEditPersona(p) ? `<button class="btn btn-small btn-ghost" data-pa="edit" data-id="${esc(p.id)}">編集</button>` : ''}
+          <button class="btn btn-small btn-ghost" data-pa="dup" data-id="${esc(p.id)}">複製</button>
+          ${canEditPersona(p) ? `<button class="btn btn-small btn-danger" data-pa="del" data-id="${esc(p.id)}">削除</button>` : ''}
+        </div>
+      </li>`).join('') : '<li class="empty">読み込み中…</li>';
+  }
+
+  function renderStudioSelects() {
+    if (!state.personas.length) return;
+    $('#cvMe').innerHTML = personaOptions(state.convo.me);
+    $('#cvAi').innerHTML = personaOptions(state.convo.ai);
+    const males = state.personas.filter((p) => p.gender === 'male');
+    const females = state.personas.filter((p) => p.gender === 'female');
+    $('#dfA').innerHTML = personaOptions((males[0] || state.personas[0]).id);
+    $('#dfB').innerHTML = personaOptions((females[0] || state.personas[1] || state.personas[0]).id);
+  }
+
+  function voiceOptions(selected) {
+    const group = (g, label) => {
+      const vs = state.voices.filter((v) => v.gender === g);
+      return vs.length ? `<optgroup label="${label}">${vs.map((v) => `<option value="${esc(v.name)}"${v.name === selected ? ' selected' : ''}>${esc(v.name)}（${esc(v.desc)}）</option>`).join('')}</optgroup>` : '';
+    };
+    return group('female', '女性の声') + group('male', '男性の声');
+  }
+
+  function openPersonaModal(p, mode) {
+    const f = $('#personaForm');
+    const editing = mode === 'edit';
+    $('#pmTitle').textContent = editing ? 'パーソナリティを編集' : 'パーソナリティを作る';
+    f.pid.value = editing ? p.id : '';
+    f.name.value = p ? (editing ? p.name : `${p.name}（コピー）`.slice(0, 20)) : '';
+    f.icon.value = p ? p.icon : '🎙';
+    f.color.value = p && /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#ff4fb4';
+    f.gender.value = p ? p.gender : 'female';
+    $('#pmVoice').innerHTML = voiceOptions(p ? p.voice : 'Kore');
+    f.prole.value = p ? p.role || '' : '';
+    f.description.value = p ? p.description || '' : '';
+    f.pstyle.value = p ? p.style || '' : '';
+    f.prompt.value = p ? p.prompt || '' : '';
+    openModal('modalPersona');
+  }
+
+  async function hearBuffer(key, req) {
+    if (previewCache.has(key)) return previewCache.get(key);
+    const p = api('tts_say', req).then((r) => audioToBuffer(r.audio));
+    previewCache.set(key, p);
+    p.catch(() => previewCache.delete(key));
+    return p;
+  }
+
+  async function playPreview(btn, key, req) {
+    unlockMedia();
+    await withBusy(btn, '生成中…', async () => {
+      try {
+        const buf = await hearBuffer(key, req);
+        btn.textContent = '♪ 再生中';
+        duck(true);
+        await playVoiceBuffer(buf);
+      } catch (e) { toast(e.message, true); } finally { duck(false); }
+    });
+  }
+
+  function bindPersonaStudio() {
+    $('#btnNewPersona').addEventListener('click', () => openPersonaModal(null, 'new'));
+    $('#personaGrid').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-pa]');
+      if (!b) return;
+      const p = state.personas.find((x) => x.id === b.dataset.id);
+      if (!p) return;
+      if (b.dataset.pa === 'hear') {
+        playPreview(b, `p:${p.id}:${p.voice}:${p.style}`, { persona: p.id, text: `こんにちは、${p.name}です。ネオンウェーブ・ラジオ、今日もよろしくお願いします。` });
+      } else if (b.dataset.pa === 'edit') {
+        openPersonaModal(p, 'edit');
+      } else if (b.dataset.pa === 'dup') {
+        openPersonaModal(p, 'dup');
+      } else if (b.dataset.pa === 'del') {
+        if (!confirm(`「${p.name}」を削除しますか？`)) return;
+        try {
+          const d = await api('persona_delete', { id: p.id });
+          toast(d.message);
+          await loadPersonas();
+        } catch (err) { toast(err.message, true); }
+      }
+    });
+    $('#pmPreview').addEventListener('click', (e) => {
+      const f = $('#personaForm');
+      const voice = f.voice.value, style = f.pstyle.value.trim();
+      const name = f.name.value.trim() || 'わたし';
+      playPreview(e.currentTarget, `v:${voice}:${style}:${name}`, { voice, style, text: `こんにちは、${name}です。この声でお話しします。どうぞよろしく。` });
+    });
+    $('#personaForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const persona = {
+        id: f.pid.value || undefined, name: f.name.value, icon: f.icon.value, color: f.color.value, gender: f.gender.value,
+        voice: f.voice.value, role: f.prole.value, description: f.description.value, style: f.pstyle.value, prompt: f.prompt.value
+      };
+      await withBusy(f.querySelector('button[type=submit]'), '保存中…', async () => {
+        try {
+          const d = await api('persona_save', { persona });
+          toast(d.message);
+          closeModal('modalPersona');
+          await loadPersonas();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+  }
+
+  /* =========================================================
+   *  台本の掛け合い
+   * ========================================================= */
+  /** 「名前：セリフ」形式のテキストをブロック（曲間1回分）に分ける */
+  function parseScript(text) {
+    const blocks = [];
+    let cur = [];
+    const push = () => { if (cur.length) blocks.push({ lines: cur.slice(0, 60) }); cur = []; };
+    String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach((raw) => {
+      const line = raw.trim();
+      if (!line) return;
+      if (/^([-ー―─=＝]\s*){3,}$/.test(line)) { push(); return; }
+      if (/^(#|＃|\/\/)/.test(line)) return;
+      let m = line.match(/^【([^】]{1,20})】\s*[：:]?\s*(.+)$/) || line.match(/^([^：:\s「『（(]{1,20})\s*[：:]\s*(.+)$/);
+      if (m) cur.push({ speaker: m[1].trim(), text: m[2].trim() });
+      else if (cur.length) cur[cur.length - 1].text += line;
+    });
+    push();
+    return blocks;
+  }
+
+  function scriptSpeakers() {
+    const out = [];
+    state.script.blocks.forEach((b) => b.lines.forEach((l) => { if (!out.includes(l.speaker)) out.push(l.speaker); }));
+    return out;
+  }
+
+  /** 名前から配役を自動で決める（名前が同じパーソナリティ → 男女の手がかり → 交互） */
+  function autoCast(speakers) {
+    const cast = {};
+    const old = state.script.cast || {};
+    const males = state.personas.filter((p) => p.gender === 'male');
+    const females = state.personas.filter((p) => p.gender === 'female');
+    const used = new Set();
+    const take = (list) => list.find((p) => !used.has(p.id)) || list[0];
+    let alt = 0;
+    speakers.forEach((sp) => {
+      if (old[sp] && hasPersona(old[sp])) { cast[sp] = old[sp]; used.add(old[sp]); }
+    });
+    speakers.forEach((sp) => {
+      if (cast[sp]) return;
+      const exact = state.personas.find((p) => p.name === sp);
+      let pick = exact;
+      if (!pick && /女|母|姉|妹|妻|嬢|子$/.test(sp)) pick = take(females);
+      if (!pick && /男|父|兄|弟|夫|氏$/.test(sp)) pick = take(males);
+      if (!pick) pick = alt++ % 2 === 0 ? take(males) || take(females) : take(females) || take(males);
+      pick = pick || state.personas[0];
+      if (pick) { cast[sp] = pick.id; used.add(pick.id); }
+    });
+    return cast;
+  }
+
+  const castFor = (b) => {
+    const c = {};
+    b.lines.forEach((l) => { c[l.speaker] = state.script.cast[l.speaker]; });
+    return c;
+  };
+  const castLabel = (b) => [...new Set(b.lines.map((l) => l.speaker))].join(' × ');
+  const blockText = (b) => b.lines.map((l) => `${l.speaker}：${l.text}`).join('\n');
+
+  function hashStr(s) {
+    let h1 = 0x811c9dc5, h2 = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+      h2 = (Math.imul(h2, 31) + c) >>> 0;
+    }
+    return h1.toString(36) + h2.toString(36) + s.length.toString(36);
+  }
+  const blockKey = (b) => 'blk_' + hashStr(JSON.stringify(b.lines.map((l) => {
+    const p = personaById(state.script.cast[l.speaker]);
+    return [l.speaker, l.text, p.voice, p.style];
+  })));
+
+  const blockBufCache = new Map();
+  const blockReady = new Set();
+
+  function getBlockBuffer(b) {
+    const key = blockKey(b);
+    if (blockBufCache.has(key)) return blockBufCache.get(key);
+    const p = (async () => {
+      let data = await idb.get(key);
+      if (!data || !data.segments) {
+        const d = await api('script_tts', { lines: b.lines, cast: castFor(b) });
+        data = { segments: d.segments, gapMs: d.gapMs };
+        idb.set(key, data);
+      }
+      const bufs = await Promise.all(data.segments.map((a) => audioToBuffer(a)));
+      const out = await joinBuffers(bufs, (data.gapMs || 250) / 1000);
+      blockReady.add(key);
+      return out;
+    })();
+    blockBufCache.set(key, p);
+    p.catch(() => blockBufCache.delete(key));
+    while (blockBufCache.size > 40) blockBufCache.delete(blockBufCache.keys().next().value);
+    return p;
+  }
+
+  function renderCast() {
+    const ul = $('#castList');
+    if (!ul) return;
+    const sps = scriptSpeakers();
+    ul.innerHTML = sps.length ? sps.map((sp) => {
+      const p = personaById(state.script.cast[sp]);
+      return `<li class="cast" style="--pc:${esc(p.color)}">
+        <span class="cast-ico" aria-hidden="true">${esc(p.icon)}</span>
+        <span class="cast-name">${esc(sp)}</span>
+        <select data-cast="${esc(sp)}" aria-label="${esc(sp)} の声">${personaOptions(state.script.cast[sp])}</select>
+      </li>`;
+    }).join('') : '<li class="empty">台本を読み込むと、話す人ごとに声を選べます</li>';
+  }
+
+  function renderBlocks() {
+    const ol = $('#blockList');
+    if (!ol) return;
+    const bs = state.script.blocks;
+    $('#blockCount').textContent = bs.length ? `${bs.length}` : '';
+    ol.innerHTML = bs.length ? bs.map((b, i) => {
+      const ready = blockReady.has(blockKey(b));
+      const cls = i < state.script.next ? 'is-done' : i === state.script.next ? 'is-next' : '';
+      return `<li class="block ${cls}">
+        <div class="block-head">
+          <span class="block-no">${i + 1}</span>
+          <span class="block-cast">${esc(castLabel(b))}</span>
+          <span class="block-state" data-bstate="${i}">${ready ? '音声あり' : ''}</span>
+          <span class="block-actions">
+            <button class="icon-btn" data-bplay="${i}" title="試聴" aria-label="ブロック${i + 1}を試聴">▶</button>
+            <button class="icon-btn" data-bexport="${i}" title="書き出す" aria-label="ブロック${i + 1}を書き出す">⬇</button>
+            <button class="icon-btn" data-bfrom="${i}" title="次にこのブロックを流す" aria-label="次にブロック${i + 1}を流す">⤴</button>
+          </span>
+        </div>
+        <p class="block-lines">${b.lines.map((l) => `<b>${esc(l.speaker)}</b>${esc(l.text)}`).join('<br>')}</p>
+      </li>`;
+    }).join('') : '<li class="empty">まだブロックがありません</li>';
+    bs.forEach((b, i) => {
+      const key = blockKey(b);
+      if (blockReady.has(key)) return;
+      idb.has(key).then((ok) => {
+        const el = ol.querySelector(`[data-bstate="${i}"]`);
+        if (ok && el) el.textContent = '音声あり';
+      });
+    });
+  }
+
+  function applyScript(text, silent) {
+    const blocks = parseScript(text);
+    state.script.text = text;
+    state.script.blocks = blocks;
+    state.script.next = 0;
+    state.segPrefetch = null;
+    state.script.cast = autoCast(scriptSpeakers());
+    savePrefs();
+    renderCast();
+    renderBlocks();
+    renderScriptStatus();
+    if (!silent) {
+      if (blocks.length) toast(`${blocks.length} ブロック・${scriptSpeakers().length} 人の台本を読み込みました`);
+      else toast('「名前：セリフ」の形で書いてください', true);
+    }
+  }
+
+  async function readTextFile(file) {
+    const buf = await file.arrayBuffer();
+    let text = new TextDecoder('utf-8').decode(buf);
+    if (text.includes('\uFFFD')) {
+      try { text = new TextDecoder('shift_jis').decode(buf); } catch (e) { /* そのまま */ }
+    }
+    return text.replace(/^\uFEFF/, '');
+  }
+
+  function bindScriptStudio() {
+    const ta = $('#scriptText');
+    ta.value = state.script.text;
+    $('#btnScriptParse').addEventListener('click', () => applyScript(ta.value));
+    $('#scriptFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      if (file.size > 300 * 1024) { toast('テキストファイルが大きすぎます（300KBまで）', true); return; }
+      ta.value = await readTextFile(file);
+      applyScript(ta.value);
+    });
+    $('#castList').addEventListener('change', (e) => {
+      const s = e.target.closest('[data-cast]');
+      if (!s) return;
+      state.script.cast[s.dataset.cast] = s.value;
+      state.segPrefetch = null;
+      savePrefs();
+      renderCast();
+      renderBlocks();
+    });
+    $('#blockList').addEventListener('click', (e) => {
+      const play = e.target.closest('[data-bplay]');
+      const ex = e.target.closest('[data-bexport]');
+      const from = e.target.closest('[data-bfrom]');
+      if (play) {
+        unlockMedia();
+        const i = Number(play.dataset.bplay);
+        performSegment(blockSegment(i).then((s) => Object.assign(s, { blockIndex: null })), state.playing, '🎙 掛け合い（試聴）')
+          .then(() => renderBlocks());
+      }
+      if (ex) {
+        const i = Number(ex.dataset.bexport);
+        const b = state.script.blocks[i];
+        openExport({ title: `掛け合い ${i + 1}（${castLabel(b)}）`, artist: castLabel(b), mono: true, getBuffer: () => getBlockBuffer(b) });
+      }
+      if (from) {
+        state.script.next = Number(from.dataset.bfrom);
+        state.segPrefetch = null;
+        renderBlocks();
+        renderScriptStatus();
+        toast(`次の曲間でブロック ${state.script.next + 1} を流します`);
+      }
+    });
+    $('#btnGenAll').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const bs = state.script.blocks;
+      if (!bs.length) { toast('先に台本を読み込んでください', true); return; }
+      btn.disabled = true;
+      try {
+        for (let i = 0; i < bs.length; i++) {
+          btn.textContent = `生成中 ${i + 1}/${bs.length}`;
+          await getBlockBuffer(bs[i]);
+          renderBlocks();
+        }
+        toast('すべてのブロックの音声ができました');
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔊 全部の音声を作る';
+      }
+    });
+    $('#btnExportAllBlocks').addEventListener('click', () => {
+      const bs = state.script.blocks;
+      if (!bs.length) { toast('先に台本を読み込んでください', true); return; }
+      openExport({
+        title: `掛け合い台本 ${stamp()}`, artist: scriptSpeakers().join(' × '), mono: true,
+        getBuffer: async () => {
+          const bufs = [];
+          for (let i = 0; i < bs.length; i++) {
+            setExportStep(`ブロック ${i + 1}/${bs.length} の音声を用意しています…`, (i / bs.length) * 0.08);
+            bufs.push(await getBlockBuffer(bs[i]));
+          }
+          return joinBuffers(bufs, 1.2);
+        }
+      });
+    });
+    $('#btnUseScript').addEventListener('click', () => {
+      if (!state.script.blocks.length) { toast('先に台本を読み込んでください', true); return; }
+      if (state.between.mode !== 'mix') state.between.mode = 'script';
+      $('#betweenMode').value = state.between.mode;
+      state.segPrefetch = null;
+      savePrefs();
+      renderScriptStatus();
+      maybePrefetchSegment();
+      showView('radio');
+      toast('曲間で台本の掛け合いを流します');
+    });
+
+    // AIで下書き
+    $('#btnDraft').addEventListener('click', () => openModal('modalDraft'));
+    $('#draftForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      if (ta.value.trim() && !confirm('今の台本を、AIの下書きで置き換えます。よろしいですか？')) return;
+      await withBusy(f.querySelector('button[type=submit]'), '書いています…', async () => {
+        try {
+          const d = await api('script_draft', { cast: [f.a.value, f.b.value], theme: f.theme.value, blocks: Number(f.blocks.value) });
+          ta.value = d.text;
+          state.script.cast = {};
+          applyScript(d.text);
+          closeModal('modalDraft');
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+  }
+
+  /* =========================================================
+   *  マイク（間があっても途切れにくい聞き取り）
+   * ========================================================= */
+  const mic = { active: false };
+
+  async function micStart(onLevel) {
+    const ctx = ensureAudio();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('このブラウザはマイクに対応していません');
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    src.connect(proc);
+    proc.connect(sink);
+    sink.connect(ctx.destination);
+    Object.assign(mic, {
+      active: true, stream, src, proc, sink, chunks: [], startedAt: performance.now(),
+      noiseSum: 0, noiseN: 0, thresh: 0, spoken: false, firstVoice: -1, lastVoice: -1, lastVoiceAt: 0, rate: ctx.sampleRate
+    });
+    const silenceMs = state.convo.silence * 1000;
+    return new Promise((resolve) => {
+      mic.resolve = resolve;
+      proc.onaudioprocess = (e) => {
+        if (!mic.active) return;
+        const d = e.inputBuffer.getChannelData(0);
+        mic.chunks.push(new Float32Array(d));
+        let sum = 0;
+        for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+        const rms = Math.sqrt(sum / d.length);
+        const now = performance.now();
+        const el = now - mic.startedAt;
+        if (el < 450) { mic.noiseSum += rms; mic.noiseN++; onLevel(0, null); return; }
+        if (!mic.thresh) mic.thresh = Math.min(0.06, Math.max(0.012, (mic.noiseSum / Math.max(1, mic.noiseN)) * 2.8));
+        const idx = mic.chunks.length - 1;
+        if (rms > mic.thresh) {
+          if (!mic.spoken) { mic.spoken = true; mic.firstVoice = idx; }
+          mic.lastVoice = idx;
+          mic.lastVoiceAt = now;
+        }
+        const quiet = mic.spoken ? now - mic.lastVoiceAt : 0;
+        onLevel(Math.min(1, rms / (mic.thresh * 4)), mic.spoken ? Math.max(0, silenceMs - quiet) : null);
+        if (mic.spoken && quiet > silenceMs) micStop('auto');
+        else if (!mic.spoken && el > CONFIG.CONVO_WAIT_SEC * 1000) micStop('nospeech');
+        else if (el > CONFIG.CONVO_MAX_SEC * 1000) micStop('max');
+      };
+    });
+  }
+
+  function micStop(reason) {
+    if (!mic.active) return;
+    mic.active = false;
+    try { mic.proc.onaudioprocess = null; mic.proc.disconnect(); mic.src.disconnect(); mic.sink.disconnect(); } catch (e) { /* noop */ }
+    mic.stream.getTracks().forEach((t) => t.stop());
+    const resolve = mic.resolve;
+    mic.resolve = null;
+    if (reason === 'cancel' || reason === 'nospeech' || (!mic.spoken && reason !== 'manual')) {
+      resolve && resolve({ reason, samples: null });
+      return;
+    }
+    const chunks = mic.chunks;
+    const from = mic.spoken ? Math.max(0, mic.firstVoice - 4) : 0;
+    const to = mic.spoken ? Math.min(chunks.length, mic.lastVoice + 6) : chunks.length;
+    const part = chunks.slice(from, to);
+    const out = new Float32Array(part.reduce((n, c) => n + c.length, 0));
+    let off = 0;
+    part.forEach((c) => { out.set(c, off); off += c.length; });
+    mic.chunks = [];
+    resolve && resolve({ reason, samples: out, rate: mic.rate });
+  }
+
+  /** 文字起こし用に 16kHz モノラル WAV にする */
+  async function toUploadWav(buf) {
+    const [ch] = await renderTo(buf, 16000, 1);
+    return NWRExport.encode('wav', { channels: [ch], sampleRate: 16000, bitDepth: 16 });
+  }
+
+  /* =========================================================
+   *  AIとの対話
+   * ========================================================= */
+  const cv = state.convo;
+
+  function setMicState(mode, text) {
+    const btn = $('#btnMic');
+    btn.classList.toggle('is-listening', mode === 'listening');
+    btn.classList.toggle('is-busy', mode === 'busy');
+    btn.disabled = mode === 'busy';
+    btn.setAttribute('aria-label', mode === 'listening' ? '話し終わったので送る' : 'マイクで話しはじめる');
+    $('#btnMicCancel').hidden = mode !== 'listening';
+    $('#micStatus').textContent = text || (mode === 'listening' ? '聞いています…' : 'マイクを押して話しかけてください');
+    if (mode !== 'listening') btn.style.setProperty('--lv', 0);
+  }
+
+  function renderSeats(speaking) {
+    const seat = (el, p, label, on) => {
+      el.style.setProperty('--pc', p.color);
+      el.classList.toggle('is-speaking', !!on);
+      el.innerHTML = `<span class="seat-ava" aria-hidden="true">${esc(p.icon)}</span><span class="seat-name">${esc(p.name)}</span><span class="seat-label">${label}</span>`;
+    };
+    if (!$('#seatMe')) return;
+    seat($('#seatMe'), personaById(cv.me), cv.convert ? 'あなた（声を変換）' : 'あなた（地声）', speaking === 'user');
+    seat($('#seatAi'), personaById(cv.ai), 'AI', speaking === 'ai');
+  }
+
+  function renderTalkLog() {
+    const ol = $('#talkLog');
+    const atBottom = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 80;
+    ol.innerHTML = cv.turns.length ? cv.turns.map((t, i) => {
+      const p = personaById(t.persona);
+      return `<li class="tl tl-${t.role}${t.speaking ? ' is-speaking' : ''}" style="--pc:${esc(p.color)}">
+        <span class="tl-ava" aria-hidden="true">${esc(p.icon)}</span>
+        <div class="tl-bubble">
+          <div class="tl-name">${esc(p.name)}${t.role === 'user' ? '（あなた）' : ''}</div>
+          <p>${esc(t.text)}</p>
+          ${t.pending ? `<span class="tl-pending">${esc(t.pending)}</span>` : ''}
+          ${t.buffer ? `<div class="tl-tools"><button data-tplay="${i}">▶ 聞く</button><button data-texport="${i}">⬇ 書き出す</button></div>` : ''}
+        </div>
+      </li>`;
+    }).join('') : '<li class="empty talk-empty">ここに会話が残ります。マイクを押して話しかけるか、「AIから話しはじめる」をどうぞ</li>';
+    if (atBottom || cv.turns.length) ol.scrollTop = ol.scrollHeight;
+  }
+
+  function pushTurn(t) {
+    cv.turns.push(t);
+    renderTalkLog();
+    return t;
+  }
+
+  async function speakTurn(t) {
+    if (!t.buffer) return;
+    t.speaking = true;
+    renderSeats(t.role);
+    renderTalkLog();
+    duck(true);
+    try { await playVoiceBuffer(t.buffer); } finally {
+      duck(false);
+      t.speaking = false;
+      renderSeats();
+      renderTalkLog();
+    }
+  }
+
+  const talkHistory = () => cv.turns.filter((t) => t.text && !t.failed).map((t) => ({ role: t.role, text: t.text })).slice(-16);
+  const talkVisible = () => state.view === 'studio' && state.studioTab === 'talk';
+
+  /** 自分の発言 → （声変換）→ AI の返事 */
+  async function convoExchange(text, rawBuf) {
+    const me = personaById(cv.me), ai = personaById(cv.ai);
+    const uTurn = pushTurn({ role: 'user', persona: me.id, text, buffer: null, pending: cv.convert ? `${me.name} の声にしています…` : '' });
+    const history = talkHistory();
+    setMicState('busy', `${ai.name} が考えています…`);
+    const userP = cv.convert
+      ? api('tts_say', { persona: me.id, text }).then((r) => audioToBuffer(r.audio))
+      : Promise.resolve(rawBuf || null);
+    const replyP = api('talk_reply', { persona: ai.id, partnerName: cv.convert ? me.name : state.user.nickname, theme: cv.theme, history });
+    replyP.catch(() => {});
+    try {
+      uTurn.buffer = await userP;
+    } catch (e) {
+      toast('声の変換に失敗したので、元の声を使います', true);
+      uTurn.buffer = rawBuf || null;
+    }
+    uTurn.pending = '';
+    renderTalkLog();
+    await speakTurn(uTurn);
+    await aiReply(replyP);
+  }
+
+  async function aiReply(replyP) {
+    const ai = personaById(cv.ai);
+    setMicState('busy', `${ai.name} が話しています…`);
+    const r = await replyP;
+    const buffer = await audioToBuffer(r.audio);
+    const t = pushTurn({ role: 'ai', persona: r.persona, text: r.text, buffer });
+    await speakTurn(t);
+  }
+
+  async function convoListen() {
+    if (cv.busy || mic.active) return;
+    unlockMedia();
+    cv.stopLoop = false;
+    setMicState('listening', '聞いています…');
+    duck(true);
+    let rec;
+    try {
+      rec = await micStart((lv, left) => {
+        $('#btnMic').style.setProperty('--lv', lv.toFixed(2));
+        if (left != null && left < state.convo.silence * 1000 - 400) $('#micStatus').textContent = `このまま ${Math.ceil(left / 1000)} 秒黙ると送ります（押すとすぐ送信）`;
+        else if (left != null) $('#micStatus').textContent = '聞いています…（押すと送信）';
+      });
+    } catch (e) {
+      duck(false);
+      setMicState('idle');
+      toast(e.name === 'NotAllowedError' ? 'マイクの使用を許可してください' : e.message, true);
+      return;
+    }
+    duck(false);
+    if (!rec.samples || !rec.samples.length) {
+      setMicState('idle', rec.reason === 'nospeech' ? '声が聞こえなかったので止めました' : '');
+      return;
+    }
+    cv.busy = true;
+    setMicState('busy', '文字にしています…');
+    try {
+      const raw = ensureAudio().createBuffer(1, rec.samples.length, rec.rate);
+      raw.getChannelData(0).set(rec.samples);
+      const wav = await toUploadWav(raw);
+      const d = await api('voice_transcribe', { base64: await blobToBase64(wav), mimeType: 'audio/wav' });
+      if (!d.text) {
+        toast('うまく聞き取れませんでした。もう一度どうぞ');
+      } else {
+        await convoExchange(d.text, raw);
+      }
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      cv.busy = false;
+      setMicState('idle');
+    }
+    if (cv.continuous && !cv.stopLoop && talkVisible()) setTimeout(() => { if (talkVisible() && !cv.stopLoop) convoListen(); }, 400);
+  }
+
+  async function convoText(text) {
+    if (cv.busy || mic.active) return;
+    unlockMedia();
+    cv.busy = true;
+    try { await convoExchange(text, null); } catch (e) { toast(e.message, true); } finally {
+      cv.busy = false;
+      setMicState('idle');
+    }
+  }
+
+  async function convoAiOpen() {
+    if (cv.busy || mic.active) return;
+    unlockMedia();
+    cv.busy = true;
+    try {
+      const me = personaById(cv.me);
+      setMicState('busy', `${personaById(cv.ai).name} が考えています…`);
+      await aiReply(api('talk_reply', { persona: cv.ai, partnerName: cv.convert ? me.name : state.user.nickname, theme: cv.theme, history: talkHistory() }));
+    } catch (e) { toast(e.message, true); } finally {
+      cv.busy = false;
+      setMicState('idle');
+    }
+    if (cv.continuous && talkVisible()) setTimeout(() => { if (talkVisible() && !cv.stopLoop) convoListen(); }, 400);
+  }
+
+  function leaveTalk() {
+    cv.stopLoop = true;
+    if (mic.active) micStop('cancel');
+  }
+
+  async function talkSessionBuffer() {
+    const bufs = cv.turns.map((t) => t.buffer).filter(Boolean);
+    if (!bufs.length) throw new Error('書き出せる会話がまだありません');
+    return joinBuffers(bufs, 0.6);
+  }
+
+  function bindTalkStudio() {
+    const me = $('#cvMe'), ai = $('#cvAi'), theme = $('#cvTheme');
+    const conv = $('#cvConvert'), cont = $('#cvContinuous'), sil = $('#cvSilence');
+    theme.value = cv.theme;
+    conv.checked = cv.convert;
+    cont.checked = cv.continuous;
+    sil.value = String(cv.silence);
+    $('#cvSilenceVal').textContent = cv.silence;
+    me.addEventListener('change', () => { cv.me = me.value; savePrefs(); renderSeats(); });
+    ai.addEventListener('change', () => { cv.ai = ai.value; savePrefs(); renderSeats(); });
+    theme.addEventListener('change', () => { cv.theme = theme.value.trim(); savePrefs(); });
+    conv.addEventListener('change', () => { cv.convert = conv.checked; savePrefs(); renderSeats(); });
+    cont.addEventListener('change', () => { cv.continuous = cont.checked; if (!cv.continuous) cv.stopLoop = true; savePrefs(); });
+    sil.addEventListener('input', () => { cv.silence = Number(sil.value); $('#cvSilenceVal').textContent = cv.silence; });
+    sil.addEventListener('change', savePrefs);
+
+    $('#btnMic').addEventListener('click', () => {
+      if (mic.active) { micStop('manual'); return; }
+      convoListen();
+    });
+    $('#btnMicCancel').addEventListener('click', () => { cv.stopLoop = true; micStop('cancel'); });
+    $('#talkComposer').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const input = $('#talkInput');
+      const text = input.value.trim();
+      if (!text) return;
+      if (cv.busy || mic.active) { toast('いまは返事を待っています'); return; }
+      input.value = '';
+      convoText(text);
+    });
+    $('#btnAiOpen').addEventListener('click', convoAiOpen);
+    $('#talkLog').addEventListener('click', async (e) => {
+      const pl = e.target.closest('[data-tplay]');
+      const ex = e.target.closest('[data-texport]');
+      if (pl) {
+        unlockMedia();
+        const t = cv.turns[Number(pl.dataset.tplay)];
+        if (t && !t.speaking && !cv.busy) speakTurn(t);
+      }
+      if (ex) {
+        const t = cv.turns[Number(ex.dataset.texport)];
+        if (t && t.buffer) {
+          const p = personaById(t.persona);
+          openExport({ title: `${p.name}「${t.text.slice(0, 16)}」`, artist: p.name, mono: true, getBuffer: async () => t.buffer });
+        }
+      }
+    });
+    $('#btnTalkExport').addEventListener('click', () => {
+      if (!cv.turns.some((t) => t.buffer)) { toast('書き出せる会話がまだありません', true); return; }
+      openExport({ title: `AIと対話 ${stamp()}`, artist: `${personaById(cv.me).name} × ${personaById(cv.ai).name}`, mono: true, getBuffer: talkSessionBuffer });
+    });
+    $('#btnTalkSave').addEventListener('click', async (e) => {
+      if (!cv.turns.some((t) => t.buffer)) { toast('保存できる会話がまだありません', true); return; }
+      const title = prompt('エピソードのタイトル', `AIと対話 ${stamp()}`);
+      if (!title) return;
+      await withBusy(e.currentTarget, '保存中…', async () => {
+        try {
+          const buf = await talkSessionBuffer();
+          const [ch] = await renderTo(buf, 44100, 1);
+          const blob = await NWRExport.encode('mp3', { channels: [ch], sampleRate: 44100, bitrate: 128 });
+          if (blob.size > CONFIG.MAX_UPLOAD_MB * 1048576) throw new Error(`会話が長すぎます（${CONFIG.MAX_UPLOAD_MB}MBまで）。書き出して保存してください`);
+          const desc = cv.turns.map((t) => `${personaById(t.persona).name}：${t.text}`).join('\n').slice(0, 500);
+          const d = await api('track_add', {
+            kind: 'podcast', source: 'drive', title: title.trim().slice(0, 80), showName: 'AIと対話',
+            description: desc, mimeType: 'audio/mpeg', fileName: safeFileName(title) + '.mp3', fileBase64: await blobToBase64(blob)
+          });
+          toast(d.message + '（ポッドキャストに追加）');
+          await loadTracks();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+    $('#btnTalkClear').addEventListener('click', () => {
+      if (!cv.turns.length || !confirm('会話をすべて消しますか？（書き出していない音声は消えます）')) return;
+      cv.turns = [];
+      renderTalkLog();
+    });
+    setMicState('idle');
+    renderTalkLog();
+  }
+
+  /* =========================================================
+   *  スタジオ
+   * ========================================================= */
+  function showStudioTab(tab) {
+    if (state.studioTab === 'talk' && tab !== 'talk') leaveTalk();
+    state.studioTab = tab;
+    $$('[data-studio-tab]').forEach((b) => {
+      const on = b.dataset.studioTab === tab;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on);
+    });
+    $$('[data-studio-panel]').forEach((p) => (p.hidden = p.dataset.studioPanel !== tab));
+  }
+
+  function bindStudio() {
+    $$('[data-studio-tab]').forEach((b) => b.addEventListener('click', () => showStudioTab(b.dataset.studioTab)));
+    bindPersonaStudio();
+    bindScriptStudio();
+    bindTalkStudio();
+    renderCast();
+    renderBlocks();
+  }
+
+  /* =========================================================
    *  起動
    * ========================================================= */
   async function boot() {
@@ -1725,6 +2871,8 @@
     bindDj();
     bindLibrary();
     bindRooms();
+    bindStudio();
+    bindExport();
     bindChrome();
     bindMediaSession();
     startVisualizer();
