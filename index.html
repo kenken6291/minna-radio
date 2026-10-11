@@ -114,6 +114,7 @@
             <div class="cabinet-actions">
               <button class="btn btn-primary" id="btnStartRadio">▶ 放送をはじめる</button>
               <button class="btn btn-ghost" id="btnCallDj">🎙 AI DJ にしゃべってもらう</button>
+              <button class="btn btn-ghost" id="btnRadioProgram">📋 番組表で放送</button>
             </div>
             <div class="grille" aria-hidden="true"></div>
           </div>
@@ -246,6 +247,8 @@
       <div class="seg studio-tabs" role="tablist" aria-label="スタジオのメニュー">
         <button class="seg-btn is-active" data-studio-tab="talk" role="tab" aria-selected="true">🎙 AIと対話</button>
         <button class="seg-btn" data-studio-tab="script" role="tab" aria-selected="false">📝 掛け合い台本</button>
+        <button class="seg-btn" data-studio-tab="catalog" role="tab" aria-selected="false">📚 台本一覧</button>
+        <button class="seg-btn" data-studio-tab="program" role="tab" aria-selected="false">📋 番組表</button>
         <button class="seg-btn" data-studio-tab="personas" role="tab" aria-selected="false">👥 パーソナリティ</button>
       </div>
 
@@ -342,6 +345,45 @@
             <ol class="rundown" id="rundownList"></ol>
             <p class="hint">上から順に、曲間ごとに1ブロックずつ流します。⏵ で「次はここから」、↑↓ で並べ替えできます。</p>
             <button class="btn btn-primary btn-block" id="btnUseScript">📻 ラジオの曲間で流す</button>
+          </section>
+        </div>
+      </div>
+
+      <!-- ---- 台本一覧 ---- -->
+      <div class="studio-panel" data-studio-panel="catalog" hidden>
+        <div class="persona-studio-head">
+          <p class="hint">作った掛け合い台本の一覧です（<span id="catalogCount"></span>）。「掛1」「掛1-2」は番組表で使う番号です。</p>
+        </div>
+        <ul class="catalog" id="scriptCatalog"></ul>
+      </div>
+
+      <!-- ---- 番組表 ---- -->
+      <div class="studio-panel" data-studio-panel="program" hidden>
+        <div class="program-layout">
+          <section class="panel">
+            <div class="panel-head">
+              <h3 class="panel-title">番組表 <span class="count" id="progCount"></span></h3>
+              <div class="panel-tools">
+                <button class="btn btn-small btn-ghost" id="btnProgAuto">交互に自動で並べる</button>
+                <button class="btn btn-small btn-ghost" id="btnProgClear">クリア</button>
+              </div>
+            </div>
+            <label class="field"><span>番号の順番で作る（曲No・掛け合いNo をカンマか空白で区切る）</span>
+              <input type="text" id="progInput" placeholder="例：掛1-1, 曲1, 曲2, 掛1-2, 曲3, 掛2" autocomplete="off"></label>
+            <div class="prog-input-actions">
+              <button class="btn btn-small btn-primary" id="btnProgApply">この順番で作る</button>
+              <button class="btn btn-small btn-ghost" id="btnProgAppend">後ろに追加</button>
+            </div>
+            <p class="hint">「曲3」は楽曲ライブラリの3番目の曲、「掛2-1」は2番目の台本の1ブロック目、「掛2」は台本まるごとです。</p>
+            <ol class="prog-list" id="progList"></ol>
+            <button class="btn btn-primary btn-block" id="btnStartProgram" hidden>📻 番組表で放送する</button>
+          </section>
+
+          <section class="panel prog-sources" id="progSources">
+            <h3 class="panel-title">曲の番号 <span class="count" id="progLibName"></span></h3>
+            <ul class="src-list" id="progSongs"></ul>
+            <h3 class="panel-title src-gap">掛け合いの番号</h3>
+            <ul class="src-list" id="progTalks"></ul>
           </section>
         </div>
       </div>

@@ -1,8 +1,9 @@
 /**
- * NEON WAVE RADIO - app.js  v1.2.0
+ * NEON WAVE RADIO - app.js  v1.3.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
+ * v1.3.0：番組表（曲No・掛け合いNoの順番で放送）/ 台本一覧
  */
 'use strict';
 (() => {
@@ -94,6 +95,7 @@
     script: { id: '', title: '', text: '', cast: {}, blocks: [] },   // 編集中の台本
     scripts: [], scriptsMax: 50, scriptId: '', rundown: [], seqNext: 0, legacyScript: null,
     libraries: [], libMax: 20, libId: '',
+    program: [], progMode: false, progPos: -1, progSongIdx: [], progRun: 0,
     convo: { me: '', ai: '', theme: '', silence: CONFIG.CONVO_SILENCE_SEC, convert: true, continuous: true, turns: [], busy: false },
     exportPrefs: Object.assign({}, CONFIG.EXPORT_DEFAULT),
     view: 'radio',
@@ -349,7 +351,7 @@
     loadPersonas();
     loadTracks();
     loadLibraries();
-    loadScripts();
+    loadScripts().then(loadProgram);
     const hash = location.hash.replace('#', '');
     showView(VIEWS.includes(hash) ? hash : 'radio');
   }
@@ -748,6 +750,7 @@
   function playList(list, start = 0) {
     if (!list.length) return;
     unlockMedia();
+    stopProgram();
     state.queue = list.slice();
     state.playedCount = 0;
     state.segPrefetch = null;
@@ -771,6 +774,7 @@
 
   function nextTrack(auto = false) {
     unlockMedia();
+    if (state.progMode) { if (!state.djBusy) progAdvance(); return; }
     const n = state.plannedNext != null ? state.plannedNext : computeNext();
     if (n == null) {
       if (!auto) toast('プレイリストの最後の曲です');
@@ -784,6 +788,7 @@
     unlockMedia();
     const { cur } = getPos();
     if (cur > 3) { seekTo(0); return; }
+    if (state.progMode) { if (!state.djBusy) progPrev(); return; }
     let p = state.idx - 1;
     if (p < 0) p = state.loop === 'all' ? state.queue.length - 1 : 0;
     loadTrack(p);
@@ -798,6 +803,7 @@
   async function onTrackEnded() {
     if (state.loop === 'one') { replayCurrent(); return; }
     state.playedCount++;
+    if (state.progMode) { progAdvance(); return; }
     const n = state.plannedNext;
     if (n == null) {
       setPlaying(false);
@@ -963,7 +969,14 @@
     $('[data-close-drawer]').addEventListener('click', () => ($('#playlistDrawer').hidden = true));
     $('#queueList').addEventListener('click', (e) => {
       const b = e.target.closest('[data-q]');
-      if (b) { unlockMedia(); loadTrack(Number(b.dataset.q)); }
+      if (!b) return;
+      unlockMedia();
+      const qi = Number(b.dataset.q);
+      if (state.progMode) {
+        const pos = state.progSongIdx.indexOf(qi);
+        if (pos >= 0) { state.progPos = pos; renderProgram(); }
+      }
+      loadTrack(qi);
     });
 
     setInterval(() => { if (state.currentSource === 'youtube' && yt && yt.getCurrentTime) updateSeek(); }, 500);
@@ -1112,6 +1125,7 @@
 
   /** 次の曲が終わったときにトークが入る予定なら、音声を先に作っておく */
   function maybePrefetchSegment() {
+    if (state.progMode) { prefetchProgram(); return; }
     if (state.between.mode === 'off' || state.plannedNext == null || state.loop === 'one') return;
     if ((state.playedCount + 1) % state.between.every !== 0) return;
     const plan = pickBetween();
@@ -1166,6 +1180,7 @@
 
   async function startRadio() {
     unlockMedia();
+    stopProgram();
     const songs = librarySongs();
     if (!songs.length) {
       if (state.libId) { toast('このライブラリにはまだ曲がありません', true); return; }
@@ -1193,6 +1208,11 @@
   function renderScriptStatus() {
     const el = $('#scriptStatus');
     if (!el) return;
+    if (state.progMode) {
+      const it = state.program[state.progPos];
+      el.textContent = `番組表で放送中：${state.progPos + 1} / ${state.program.length}${it ? '（' + progLabel(it).no + '）' : ''}`;
+      return;
+    }
     const seq = betweenSeq();
     const n = seq.length;
     const m = state.between.mode;
@@ -1272,7 +1292,7 @@
 
   const canDelete = (t) => state.user && (t.ownerId === state.user.userId || state.user.role === 'admin');
 
-  function trackItemHtml(t, listName, i) {
+  function trackItemHtml(t, listName, i, no) {
     const sub = t.kind === 'podcast'
       ? `${esc(t.ownerName || '')} さんが登録`
       : `${esc(trackSubtitle(t))}（${esc(t.ownerName || '')} さんが登録）`;
@@ -1280,7 +1300,7 @@
       <li class="track" data-track-id="${esc(t.id)}">
         <button class="track-cover" style="background:${coverBg(t.title)}" data-play="${listName}" data-i="${i}" aria-label="「${esc(t.title)}」を再生"><span class="play-ico">▶</span></button>
         <div class="track-main">
-          <div class="track-title">${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
+          <div class="track-title">${no ? `<span class="track-no">曲${no}</span>` : ''}${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
           <div class="track-meta">${sub}</div>
           ${t.kind === 'podcast' && t.description ? `<p class="ep-desc">${esc(t.description)}</p>` : ''}
         </div>
@@ -1420,18 +1440,20 @@
 
   function renderSongs() {
     let songs = librarySongs();
+    const noMap = new Map(songs.map((t, i) => [t.id, i + 1]));
     const f = state.songFilter;
     if (f === 'ai') songs = songs.filter((t) => t.aiGenerated);
     if (f === 'youtube') songs = songs.filter((t) => t.source === 'youtube');
     if (f === 'mine') songs = songs.filter((t) => state.user && t.ownerId === state.user.userId);
     lists.songs = songs;
     $('#songList').innerHTML = songs.length
-      ? songs.map((t, i) => trackItemHtml(t, 'songs', i)).join('')
+      ? songs.map((t, i) => trackItemHtml(t, 'songs', i, noMap.get(t.id))).join('')
       : (state.libId
         ? '<li class="empty">このライブラリにはまだ曲がありません。「すべての曲」から 📁 で入れられます</li>'
         : '<li class="empty">まだ曲がありません。「＋ 曲を追加」から登録できます</li>');
     markCurrentInLists();
     if ($('#libSelect')) renderLibSelect();
+    renderProgram();
   }
 
   function renderPodcasts() {
@@ -2547,11 +2569,13 @@
     const sel = $('#scriptSelect');
     if (!sel) return;
     sel.innerHTML = state.scripts.length
-      ? state.scripts.map((x) => `<option value="${esc(x.id)}">${esc(x.title)}（${blocksOf(x).length}ブロック）</option>`).join('')
+      ? state.scripts.map((x, i) => `<option value="${esc(x.id)}">掛${i + 1}　${esc(x.title)}（${blocksOf(x).length}ブロック）</option>`).join('')
       : '<option value="">（台本はまだありません）</option>';
     sel.value = state.scriptId;
     $('#scriptCount').textContent = `${state.scripts.length} / ${state.scriptsMax}`;
     $('#btnScriptDelete').disabled = !state.scriptId;
+    renderScriptCatalog();
+    renderProgram();
   }
 
   function storeScript(sc) {
@@ -2638,7 +2662,7 @@
       const isNext = cur && cur.sid === state.script.id && cur.bi === i;
       return `<li class="block${isNext ? ' is-next' : ''}">
         <div class="block-head">
-          <span class="block-no">${i + 1}</span>
+          <span class="block-no">${state.script.id ? `${scriptNo(state.script.id)}-` : ''}${i + 1}</span>
           <span class="block-cast">${esc(castLabel(b))}</span>
           <span class="block-state" data-bstate="${i}">${ready ? '音声あり' : ''}</span>
           <span class="block-actions">
@@ -2878,6 +2902,345 @@
           closeModal('modalDraft');
         } catch (err) { toast(err.message, true); }
       });
+    });
+  }
+
+  /* =========================================================
+   *  番組表（曲No と 掛け合いNo の順番で放送）
+   * ========================================================= */
+  const trackById = (id) => state.tracks.find((t) => t.id === id);
+  const scriptNo = (sid) => state.scripts.findIndex((x) => x.id === sid) + 1;
+  let progSaveTimer = null;
+
+  async function loadProgram() {
+    try {
+      const d = await api('program_get');
+      state.program = d.items || [];
+    } catch (e) { toast(e.message, true); }
+    renderProgram();
+  }
+
+  function saveProgram() {
+    clearTimeout(progSaveTimer);
+    progSaveTimer = setTimeout(async () => {
+      try { await api('program_save', { items: state.program }); }
+      catch (e) { toast('番組表を保存できませんでした：' + e.message, true); }
+    }, 600);
+  }
+
+  function programChanged() {
+    if (state.progMode) {
+      // 放送中に編集したら、番組表で放送し直すまで続きはそのまま
+      state.progMode = false;
+      toast('番組表を変更したので、番組表での放送を止めました。もう一度「番組表で放送」を押してください');
+    }
+    saveProgram();
+    renderProgram();
+  }
+
+  /** 番組表の1行の表示 */
+  function progLabel(it) {
+    if (it.t === 's') {
+      const t = trackById(it.id);
+      if (!t) return { ico: '🎵', no: '曲?', title: '（見つからない曲）', sub: '', missing: true };
+      const no = librarySongs().findIndex((x) => x.id === t.id) + 1;
+      return { ico: '🎵', no: no ? `曲${no}` : '曲', title: t.title, sub: trackSubtitle(t) + (no ? '' : '（今のライブラリ外）') };
+    }
+    const sc = scriptById(it.sid);
+    if (!sc) return { ico: '🎙', no: '掛?', title: '（削除された台本）', sub: '', missing: true };
+    const n = scriptNo(sc.id);
+    const bs = blocksOf(sc);
+    if (it.b < 0) return { ico: '🎙', no: `掛${n}`, title: sc.title, sub: `全 ${bs.length} ブロックを続けて` };
+    const blk = bs[it.b];
+    return { ico: '🎙', no: `掛${n}-${it.b + 1}`, title: sc.title, sub: blk ? castLabel(blk) + '「' + blk.lines[0].text.slice(0, 24) + '」' : '（ブロックがありません）', missing: !blk };
+  }
+
+  function renderProgram() {
+    const ol = $('#progList');
+    if (!ol) return;
+    const p = state.program;
+    $('#progCount').textContent = p.length ? `${p.filter((x) => x.t === 's').length}曲・${p.filter((x) => x.t === 'k').length}トーク` : '';
+    ol.innerHTML = p.length ? p.map((it, i) => {
+      const l = progLabel(it);
+      const now = state.progMode && i === state.progPos;
+      const done = state.progMode && i < state.progPos;
+      return `<li class="pg pg-${it.t}${now ? ' is-now' : ''}${done ? ' is-done' : ''}${l.missing ? ' is-missing' : ''}">
+        <span class="pg-pos">${i + 1}</span>
+        <span class="pg-no">${l.ico} ${esc(l.no)}</span>
+        <div class="pg-main"><b>${esc(l.title)}</b><span>${esc(l.sub)}</span></div>
+        <span class="rd-actions">
+          <button class="icon-btn" data-pgfrom="${i}" title="ここから放送" aria-label="ここから放送">⏵</button>
+          <button class="icon-btn" data-pgup="${i}" title="上へ" aria-label="上へ"${i === 0 ? ' disabled' : ''}>↑</button>
+          <button class="icon-btn" data-pgdown="${i}" title="下へ" aria-label="下へ"${i === p.length - 1 ? ' disabled' : ''}>↓</button>
+          <button class="icon-btn" data-pgdel="${i}" title="外す" aria-label="外す">✕</button>
+        </span>
+      </li>`;
+    }).join('') : '<li class="empty">番号を入力するか、右の一覧の「＋」で曲と掛け合いを並べてください</li>';
+    $('#btnStartProgram').hidden = !p.length;
+    renderProgSources();
+  }
+
+  /** 番組表に入れる素材（曲No・掛け合いNo の一覧） */
+  function renderProgSources() {
+    const sl = $('#progSongs');
+    if (!sl) return;
+    const lib = libById(state.libId);
+    $('#progLibName').textContent = lib ? `ライブラリ「${lib.name}」` : 'すべての曲';
+    const songs = librarySongs();
+    sl.innerHTML = songs.length ? songs.map((t, i) => `
+      <li><button class="src-add" data-psong="${esc(t.id)}" aria-label="曲${i + 1}を追加">＋</button>
+        <span class="src-no">曲${i + 1}</span><span class="src-title">${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</span></li>`).join('')
+      : '<li class="empty">曲がありません</li>';
+    $('#progTalks').innerHTML = state.scripts.length ? state.scripts.map((sc, si) => {
+      const bs = blocksOf(sc);
+      return `<li class="src-script">
+        <div class="src-head"><button class="src-add" data-ptalk="${esc(sc.id)}" data-pb="-1" aria-label="掛${si + 1}を丸ごと追加">＋</button>
+          <span class="src-no">掛${si + 1}</span><span class="src-title">${esc(sc.title)}</span></div>
+        <ul>${bs.map((b, bi) => `<li><button class="src-add" data-ptalk="${esc(sc.id)}" data-pb="${bi}" aria-label="掛${si + 1}-${bi + 1}を追加">＋</button>
+          <span class="src-no">掛${si + 1}-${bi + 1}</span><span class="src-title">${esc(castLabel(b))}「${esc(b.lines[0].text.slice(0, 20))}」</span></li>`).join('')}</ul>
+      </li>`;
+    }).join('') : '<li class="empty">台本がありません</li>';
+  }
+
+  /** 「曲1, 掛2-1, 曲2」のような番号の並びを番組表にする */
+  function parseProgramText(text) {
+    const songs = librarySongs();
+    const items = [], bad = [];
+    String(text || '').normalize('NFKC').split(/[\s,、，→>＞・;／/]+/).map((x) => x.trim()).filter(Boolean).forEach((tok) => {
+      let m = tok.match(/^(?:曲|s|S)?(\d+)$/);
+      if (m) {
+        const t = songs[Number(m[1]) - 1];
+        if (t) items.push({ t: 's', id: t.id }); else bad.push(tok);
+        return;
+      }
+      m = tok.match(/^(?:掛|掛け合い|k|K|t|T)(\d+)(?:[-‐−ー―](\d+))?$/);
+      if (m) {
+        const sc = state.scripts[Number(m[1]) - 1];
+        const b = m[2] ? Number(m[2]) - 1 : -1;
+        if (sc && (b < 0 || blocksOf(sc)[b])) items.push({ t: 'k', sid: sc.id, b }); else bad.push(tok);
+        return;
+      }
+      bad.push(tok);
+    });
+    return { items, bad };
+  }
+
+  /** 曲と掛け合い（放送順）を交互に並べる */
+  function autoProgram() {
+    const songs = librarySongs();
+    const talks = betweenSeq();
+    if (!songs.length) { toast('曲がありません', true); return; }
+    const every = state.between.every || 1;
+    const out = [];
+    let k = 0;
+    if (talks[k]) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
+    songs.forEach((t, i) => {
+      out.push({ t: 's', id: t.id });
+      if ((i + 1) % every === 0 && talks[k] && i < songs.length - 1) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
+    });
+    if (talks[k]) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
+    return out;
+  }
+
+  /* ---------- 番組表で放送 ---------- */
+  async function startProgram(from = 0) {
+    unlockMedia();
+    if (!state.program.length) { toast('番組表が空です', true); return; }
+    if (state.djBusy) { toast('トークの最中です。終わってからもう一度どうぞ'); return; }
+    state.queue = [];
+    state.progSongIdx = [];
+    state.program.forEach((it, i) => {
+      const t = it.t === 's' && trackById(it.id);
+      if (t) { state.progSongIdx[i] = state.queue.length; state.queue.push(t); }
+    });
+    stopAll();
+    state.progMode = true;
+    state.playedCount = 0;
+    state.segPrefetch = null;
+    state.progPos = from - 1;
+    state.progRun = (state.progRun || 0) + 1;
+    renderQueue();
+    toast('番組表で放送します');
+    progAdvance();
+  }
+
+  function stopProgram() {
+    if (!state.progMode) return;
+    state.progMode = false;
+    state.progRun = (state.progRun || 0) + 1;
+    renderProgram();
+    renderScriptStatus();
+  }
+
+  async function progAdvance() {
+    const run = state.progRun;
+    let guard = 0;
+    while (state.progMode && run === state.progRun) {
+      if (++guard > state.program.length * 2 + 2) { stopProgram(); toast('番組表に流せる項目がありません', true); return; }
+      state.progPos++;
+      if (state.progPos >= state.program.length) {
+        if (state.loop === 'all') { state.progPos = -1; continue; }
+        stopProgram();
+        setPlaying(false);
+        toast('番組表を最後まで放送しました');
+        return;
+      }
+      renderProgram();
+      renderScriptStatus();
+      const it = state.program[state.progPos];
+      if (it.t === 's') {
+        const qi = state.progSongIdx[state.progPos];
+        if (qi == null) continue;
+        loadTrack(qi);
+        return;
+      }
+      const sc = scriptById(it.sid);
+      if (!sc) continue;
+      const bs = blocksOf(sc);
+      const list = it.b < 0 ? bs.map((_, i) => i) : (bs[it.b] ? [it.b] : []);
+      const n = scriptNo(sc.id);
+      for (const bi of list) {
+        await performSegment(makeBlockSegment(bs[bi], sc.cast || {}, `${sc.title} ${bi + 1}`), false, `🎙 掛${n}-${bi + 1}`);
+        if (!state.progMode || run !== state.progRun) return;
+      }
+    }
+  }
+
+  /** 次に流すトークの音声を先に作っておく */
+  function prefetchProgram() {
+    for (let i = state.progPos + 1; i < state.program.length; i++) {
+      const it = state.program[i];
+      if (it.t === 's') return;
+      const sc = scriptById(it.sid);
+      if (!sc) continue;
+      const bs = blocksOf(sc);
+      (it.b < 0 ? bs : [bs[it.b]]).filter(Boolean).forEach((b) => getBlockBuffer(b, sc.cast || {}).catch(() => {}));
+      return;
+    }
+  }
+
+  function progPrev() {
+    for (let i = state.progPos - 1; i >= 0; i--) {
+      if (state.program[i].t === 's' && state.progSongIdx[i] != null) { state.progPos = i - 1; progAdvance(); return; }
+    }
+    seekTo(0);
+  }
+
+  function bindProgram() {
+    $('#btnProgApply').addEventListener('click', () => {
+      const { items, bad } = parseProgramText($('#progInput').value);
+      if (!items.length) { toast(bad.length ? `番号が見つかりません：${bad.join('、')}` : '番号を入力してください', true); return; }
+      if (state.program.length && !confirm('今の番組表を、入力した順番で置き換えますか？')) return;
+      state.program = items.slice(0, 300);
+      programChanged();
+      toast(bad.length ? `${items.length} 件で作りました（見つからない番号：${bad.join('、')}）` : `${items.length} 件の番組表を作りました`, !!bad.length);
+    });
+    $('#btnProgAppend').addEventListener('click', () => {
+      const { items, bad } = parseProgramText($('#progInput').value);
+      if (!items.length) { toast(bad.length ? `番号が見つかりません：${bad.join('、')}` : '番号を入力してください', true); return; }
+      state.program = state.program.concat(items).slice(0, 300);
+      programChanged();
+      toast(bad.length ? `追加しました（見つからない番号：${bad.join('、')}）` : `${items.length} 件を後ろに追加しました`, !!bad.length);
+    });
+    $('#btnProgAuto').addEventListener('click', () => {
+      if (state.program.length && !confirm('今の番組表を、曲と掛け合いを交互に並べた内容で置き換えますか？')) return;
+      const items = autoProgram();
+      if (!items) return;
+      state.program = items.slice(0, 300);
+      programChanged();
+      toast('曲と掛け合いを交互に並べました');
+    });
+    $('#btnProgClear').addEventListener('click', () => {
+      if (!state.program.length || !confirm('番組表をクリアしますか？')) return;
+      state.program = [];
+      stopProgram();
+      programChanged();
+    });
+    $('#progList').addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn || btn.disabled) return;
+      const d = btn.dataset, p = state.program;
+      if (d.pgfrom != null) { startProgram(Number(d.pgfrom)); return; }
+      if (d.pgup != null) { const i = Number(d.pgup); [p[i - 1], p[i]] = [p[i], p[i - 1]]; }
+      else if (d.pgdown != null) { const i = Number(d.pgdown); [p[i + 1], p[i]] = [p[i], p[i + 1]]; }
+      else if (d.pgdel != null) { p.splice(Number(d.pgdel), 1); }
+      else return;
+      programChanged();
+    });
+    $('#progSources').addEventListener('click', (e) => {
+      const s = e.target.closest('[data-psong]');
+      const k = e.target.closest('[data-ptalk]');
+      if (!s && !k) return;
+      if (state.program.length >= 300) { toast('番組表は300件までです', true); return; }
+      state.program.push(s ? { t: 's', id: s.dataset.psong } : { t: 'k', sid: k.dataset.ptalk, b: Number(k.dataset.pb) });
+      programChanged();
+      const ol = $('#progList');
+      ol.scrollTop = ol.scrollHeight;
+    });
+    $('#btnStartProgram').addEventListener('click', () => { showView('radio'); startProgram(0); });
+    $('#btnRadioProgram').addEventListener('click', () => startProgram(0));
+  }
+
+  /* =========================================================
+   *  台本一覧（概要）
+   * ========================================================= */
+  const fmtDate = (ms) => {
+    if (!ms) return '';
+    const d = new Date(ms);
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  function renderScriptCatalog() {
+    const ul = $('#scriptCatalog');
+    if (!ul) return;
+    $('#catalogCount').textContent = `${state.scripts.length} / ${state.scriptsMax}`;
+    ul.innerHTML = state.scripts.length ? state.scripts.map((sc, si) => {
+      const bs = blocksOf(sc);
+      const speakers = [];
+      bs.forEach((b) => b.lines.forEach((l) => { if (!speakers.includes(l.speaker)) speakers.push(l.speaker); }));
+      const lines = bs.reduce((n, b) => n + b.lines.length, 0);
+      const chars = bs.reduce((n, b) => n + b.lines.reduce((m, l) => m + l.text.length, 0), 0);
+      const minutes = Math.max(1, Math.round(chars / 300));
+      const first = bs[0] ? bs[0].lines.slice(0, 2).map((l) => `<b>${esc(l.speaker)}</b>${esc(l.text)}`).join('<br>') : '（セリフがありません）';
+      return `<li class="cat">
+        <div class="cat-head">
+          <span class="cat-no">掛${si + 1}</span>
+          <div class="cat-id"><h4>${esc(sc.title)}</h4>
+            <p>${bs.length} ブロック・${lines} セリフ・約 ${minutes} 分${sc.updatedAt ? '・' + fmtDate(sc.updatedAt) + ' 更新' : ''}</p></div>
+        </div>
+        <div class="cat-cast">${speakers.map((sp) => { const p = personaById((sc.cast || {})[sp]); return `<span style="--pc:${esc(p.color)}">${esc(p.icon)} ${esc(sp)}</span>`; }).join('')}</div>
+        <p class="cat-lead">${first}</p>
+        ${bs.length ? `<details class="cat-blocks"><summary>ブロックの一覧</summary><ol>${bs.map((b, bi) =>
+          `<li><span class="src-no">掛${si + 1}-${bi + 1}</span>${esc(castLabel(b))}「${esc(b.lines[0].text.slice(0, 30))}」（${b.lines.length}行）</li>`).join('')}</ol></details>` : ''}
+        <div class="cat-actions">
+          <button class="btn btn-small btn-ghost" data-cat-open="${esc(sc.id)}">開いて編集</button>
+          <button class="btn btn-small btn-ghost" data-cat-prog="${esc(sc.id)}">＋ 番組表に追加</button>
+          <button class="btn btn-small btn-ghost" data-cat-run="${esc(sc.id)}">＋ 曲間の放送順に追加</button>
+        </div>
+      </li>`;
+    }).join('') : '<li class="empty">台本はまだありません。「掛け合い台本」タブで作れます</li>';
+  }
+
+  function bindScriptCatalog() {
+    $('#scriptCatalog').addEventListener('click', (e) => {
+      const op = e.target.closest('[data-cat-open]');
+      const pg = e.target.closest('[data-cat-prog]');
+      const rn = e.target.closest('[data-cat-run]');
+      if (op) {
+        if (scriptDirty() && !confirm('編集中の台本に保存していない変更があります。破棄して開きますか？')) return;
+        openScript(op.dataset.catOpen);
+        showStudioTab('script');
+      }
+      if (pg) {
+        state.program.push({ t: 'k', sid: pg.dataset.catProg, b: -1 });
+        programChanged();
+        toast('番組表に追加しました');
+      }
+      if (rn) {
+        state.rundown.push({ sid: rn.dataset.catRun, b: -1 });
+        rundownChanged();
+        toast('曲間の放送順に追加しました');
+      }
     });
   }
 
@@ -3238,6 +3601,8 @@
     bindPersonaStudio();
     bindScriptStudio();
     bindTalkStudio();
+    bindProgram();
+    bindScriptCatalog();
     renderCast();
     renderBlocks();
   }

@@ -1,4 +1,4 @@
-# NEON WAVE RADIO（minna-radio）v1.2.0
+# NEON WAVE RADIO（minna-radio）v1.3.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
@@ -52,8 +52,9 @@ minna-radio/
 | Personas | id, name, icon, color, gender, voice, role, description, style, prompt, ownerId, ownerName, createdAt, updatedAt |
 | Libraries | id, ownerId, name, trackIds(JSON), createdAt, updatedAt |
 | Scripts | id, ownerId, title, text, cast(JSON), createdAt, updatedAt |
+| Programs | ownerId, items(JSON), updatedAt |
 
-※ Personas / Libraries / Scripts シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ Personas / Libraries / Scripts / Programs シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
 
 日時はすべてミリ秒の数値（テキスト書式）で保存しています。
 
@@ -84,6 +85,16 @@ minna-radio/
 - スマホで画面を消すと YouTube は止まります（YouTube側の仕様）。Drive／外部URLの曲はロック画面の操作に対応。
 - iPhone では音量スライダーが外部URL・YouTube に効かない場合があります（端末の音量ボタンで調整）。
 - **AIパーソナリティ**は「スタジオ → パーソナリティ」で作成・編集・複製・削除できます（声30種類から選択、話し方・キャラクター設定も自由）。標準の5人は `Code.gs` の `BUILTIN_PERSONAS` にあり、画面からは編集できません（複製して使う）。
+
+## v1.3.0 の変更点
+
+- **番組表**（スタジオ →「📋 番組表」）：曲と掛け合いを好きな順番で並べて放送できます。
+  - 番号で入力：`掛1-1, 曲1, 曲2, 掛1-2, 曲3, 掛2` のように書いて「この順番で作る」。
+  - 「曲3」＝楽曲ライブラリ（選んでいるセット）の3番目、「掛2-1」＝2番目の台本の1ブロック目、「掛2」＝台本まるごと。
+  - 右側の番号一覧の「＋」でも追加でき、↑↓ で並べ替え、⏵ でその行から放送。「交互に自動で並べる」も使えます。
+  - ラジオ画面の「📋 番組表で放送」でも開始できます。番組表はサーバーに保存されます。
+- 楽曲ライブラリの各曲に「曲No」を表示。
+- **台本一覧**（スタジオ →「📚 台本一覧」）：全台本の番号・ブロック数・セリフ数・目安の長さ・話し手・冒頭・ブロック一覧を一覧表示。
 
 ## v1.2.0 の変更点
 

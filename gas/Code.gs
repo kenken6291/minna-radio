@@ -3,6 +3,7 @@
  * Version 1.2.0
  *   v1.1.0 パーソナリティ管理 / 台本の掛け合い（複数話者TTS） / AIとの対話（文字起こし＋声変換）
  *   v1.2.0 楽曲ライブラリ（1人20セット） / 台本の保存（1人50セット） / 読み上げに指示文を入れない
+ *   v1.3.0 番組表（曲No・掛け合いNoの順番で放送）を保存
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -15,7 +16,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -43,7 +44,8 @@ const HEAD = {
   RoomMessages: ['id', 'roomId', 'userId', 'nickname', 'type', 'text', 'fileId', 'mimeType', 'persona', 'createdAt'],
   Personas:     ['id', 'name', 'icon', 'color', 'gender', 'voice', 'role', 'description', 'style', 'prompt', 'ownerId', 'ownerName', 'createdAt', 'updatedAt'],
   Libraries:    ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt'],
-  Scripts:      ['id', 'ownerId', 'title', 'text', 'cast', 'createdAt', 'updatedAt']
+  Scripts:      ['id', 'ownerId', 'title', 'text', 'cast', 'createdAt', 'updatedAt'],
+  Programs:     ['ownerId', 'items', 'updatedAt']
 };
 
 /* ============================================================
@@ -189,6 +191,9 @@ const ROUTES = {
   scripts_list: scriptsList_,
   script_save: scriptSave_,
   script_delete: scriptDelete_,
+  // 番組表
+  program_get: programGet_,
+  program_save: programSave_,
   // 台本の掛け合い
   script_tts: scriptTts_,
   script_draft: scriptDraft_,
@@ -830,6 +835,30 @@ function scriptDelete_(req) {
     deleteRow_('Scripts', row);
   });
   return { message: '台本を削除しました' };
+}
+
+/* ============================================================
+ *  番組表（曲と掛け合いの放送順。1人1つ）
+ * ============================================================ */
+function programGet_(req) {
+  const user = auth_(req);
+  const row = readAll_('Programs').filter(function (r) { return r.ownerId === user.userId; })[0];
+  return { items: row ? parseJsonArr_(row.items) : [] };
+}
+
+function programSave_(req) {
+  const user = auth_(req);
+  const items = (Array.isArray(req.items) ? req.items : []).slice(0, 300).map(function (it) {
+    if (it && it.t === 's' && /^t_\w+$/.test(String(it.id))) return { t: 's', id: String(it.id) };
+    if (it && it.t === 'k' && /^s_\w+$/.test(String(it.sid))) return { t: 'k', sid: String(it.sid), b: Math.max(-1, Math.floor(Number(it.b) || 0)) };
+    return null;
+  }).filter(Boolean);
+  withLock_(function () {
+    const row = readAll_('Programs').filter(function (r) { return r.ownerId === user.userId; })[0];
+    if (row) update_('Programs', row, { items: JSON.stringify(items), updatedAt: now_() });
+    else append_('Programs', { ownerId: user.userId, items: JSON.stringify(items), updatedAt: now_() });
+  });
+  return { count: items.length };
 }
 
 /* ============================================================
