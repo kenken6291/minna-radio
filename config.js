@@ -4,7 +4,7 @@
  */
 const CONFIG = {
   APP_NAME: "NEON WAVE RADIO",
-  VERSION: "1.3.0",
+  VERSION: "1.3.1",
 
   // GAS Web アプリの URL（デプロイ後に貼り替え）
   GAS_URL: "https://script.google.com/macros/s/AKfycbw_aR-6dDuVc0mjwSHuHzynUnNM27i1CqOy2ayHE_VEpCIb1sYNQGndBLf9yQM4zu65/exec",

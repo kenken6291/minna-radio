@@ -1,9 +1,10 @@
 /**
- * NEON WAVE RADIO - app.js  v1.3.0
+ * NEON WAVE RADIO - app.js  v1.3.1
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
  * v1.3.0：番組表（曲No・掛け合いNoの順番で放送）/ 台本一覧
+ * v1.3.1：ライブラリ内の曲の並べ替え（一番上・1つ上・1つ下・一番下・番号を指定）
  */
 'use strict';
 (() => {
@@ -72,6 +73,7 @@
     appStarted: false,
     tracks: [],
     songFilter: 'all',
+    reorder: false,
     queue: [],
     idx: -1,
     playing: false,
@@ -1293,24 +1295,32 @@
   const canDelete = (t) => state.user && (t.ownerId === state.user.userId || state.user.role === 'admin');
 
   function trackItemHtml(t, listName, i, no) {
+    const sorting = listName === 'songs' && state.reorder && !!state.libId && !!no;
     const sub = t.kind === 'podcast'
       ? `${esc(t.ownerName || '')} さんが登録`
       : `${esc(trackSubtitle(t))}（${esc(t.ownerName || '')} さんが登録）`;
     return `
-      <li class="track" data-track-id="${esc(t.id)}">
+      <li class="track${sorting ? ' is-sorting' : ''}" data-track-id="${esc(t.id)}">
         <button class="track-cover" style="background:${coverBg(t.title)}" data-play="${listName}" data-i="${i}" aria-label="「${esc(t.title)}」を再生"><span class="play-ico">▶</span></button>
         <div class="track-main">
-          <div class="track-title">${no ? `<span class="track-no">曲${no}</span>` : ''}${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
+          <div class="track-title">${no ? (sorting
+            ? `<button class="track-no track-no-btn" data-mvto="${esc(t.id)}" title="番号を指定して移動">曲${no}</button>`
+            : `<span class="track-no">曲${no}</span>`) : ''}${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
           <div class="track-meta">${sub}</div>
           ${t.kind === 'podcast' && t.description ? `<p class="ep-desc">${esc(t.description)}</p>` : ''}
         </div>
-        <div class="track-actions">
-          <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
+        ${sorting ? `<div class="track-actions track-order">
+          <button class="icon-btn" data-mv="top" data-id="${esc(t.id)}" title="一番上へ" aria-label="一番上へ"${no === 1 ? ' disabled' : ''}>⤒</button>
+          <button class="icon-btn" data-mv="up" data-id="${esc(t.id)}" title="1つ上へ" aria-label="1つ上へ"${no === 1 ? ' disabled' : ''}>↑</button>
+          <button class="icon-btn" data-mv="down" data-id="${esc(t.id)}" title="1つ下へ" aria-label="1つ下へ"${no === lists.songs.length ? ' disabled' : ''}>↓</button>
+          <button class="icon-btn" data-mv="bottom" data-id="${esc(t.id)}" title="一番下へ" aria-label="一番下へ"${no === lists.songs.length ? ' disabled' : ''}>⤓</button>
+        </div>` : `<div class="track-actions">
+          <button class="icon-btn" data-next=""${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
           ${t.kind === 'song' ? `<button class="icon-btn" data-libpick="${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
           ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
           ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
-        </div>
+        </div>`}
       </li>`;
   }
 
@@ -1348,6 +1358,52 @@
     $('#libCount').textContent = `${state.libraries.length} / ${state.libMax}`;
     $('#btnLibRename').disabled = !state.libId;
     $('#btnLibDelete').disabled = !state.libId;
+    const sortBtn = $('#btnLibSort');
+    if (!state.libId) state.reorder = false;
+    sortBtn.disabled = !state.libId;
+    sortBtn.classList.toggle('is-active', state.reorder);
+    sortBtn.textContent = state.reorder ? '✓ 並べ替え完了' : '↕ 並べ替え';
+    $('#libSortHint').hidden = !state.reorder;
+    $('#songFilter').hidden = state.reorder;
+  }
+
+  /* ---------- ライブラリ内の曲の並べ替え ---------- */
+  let libSaveTimer = null;
+  function scheduleLibSave(lib) {
+    clearTimeout(libSaveTimer);
+    libSaveTimer = setTimeout(async () => {
+      try { await saveLibrary(lib); }
+      catch (e) { toast('並び順を保存できませんでした：' + e.message, true); loadLibraries(); }
+    }, 700);
+  }
+
+  /** how: top / up / down / bottom / 数値（移動先の曲No） */
+  function moveTrack(id, how) {
+    const lib = libById(state.libId);
+    if (!lib) return;
+    const ids = librarySongs().map((t) => t.id);
+    const from = ids.indexOf(id);
+    if (from < 0) return;
+    let to = from;
+    if (how === 'top') to = 0;
+    else if (how === 'up') to = from - 1;
+    else if (how === 'down') to = from + 1;
+    else if (how === 'bottom') to = ids.length - 1;
+    else if (typeof how === 'number') to = how - 1;
+    to = Math.max(0, Math.min(ids.length - 1, to));
+    if (to === from) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, id);
+    lib.trackIds = ids;
+    renderSongs();
+    const li = $(`#songList [data-track-id="${CSS.escape(id)}"]`);
+    if (li) {
+      li.classList.remove('is-moved');
+      void li.offsetWidth;
+      li.classList.add('is-moved');
+      li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    scheduleLibSave(lib);
   }
 
   async function saveLibrary(lib) {
@@ -1396,6 +1452,26 @@
   }
 
   function bindLibrarySets() {
+    $('#btnLibSort').addEventListener('click', () => {
+      if (!state.libId) return;
+      state.reorder = !state.reorder;
+      if (state.reorder && state.songFilter !== 'all') {
+        state.songFilter = 'all';
+        $$('#songFilter .chip').forEach((x) => x.classList.toggle('is-active', x.dataset.filter === 'all'));
+      }
+      renderLibSelect();
+      renderSongs();
+    });
+    $('#songList').addEventListener('click', (e) => {
+      const mv = e.target.closest('[data-mv]');
+      if (mv && !mv.disabled) { moveTrack(mv.dataset.id, mv.dataset.mv); return; }
+      const to = e.target.closest('[data-mvto]');
+      if (to) {
+        const n = librarySongs().length;
+        const v = Number(String(prompt(`何番目に移動しますか？（1〜${n}）`) || '').normalize('NFKC').trim());
+        if (Number.isInteger(v) && v >= 1) moveTrack(to.dataset.mvto, Math.min(v, n));
+      }
+    });
     $('#libSelect').addEventListener('change', (e) => {
       state.libId = e.target.value;
       savePrefs();

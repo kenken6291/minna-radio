@@ -1,5 +1,5 @@
 /* =========================================================
-   NEON WAVE RADIO - style.css  v1.3.0
+   NEON WAVE RADIO - style.css  v1.3.1
    ========================================================= */
 :root {
   --ink: #0d0a1f;          /* 夜空 */
@@ -803,6 +803,28 @@ input[type="range"] { accent-color: var(--magenta); }
 @media (max-width: 900px) {
   .program-layout { grid-template-columns: 1fr; }
   .prog-sources { max-height: none; }
+}
+
+/* =========================================================
+   v1.3.1 追加：ライブラリ内の並べ替え
+   ========================================================= */
+.lib-sort-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -4px 0 12px; }
+#btnLibSort:disabled { opacity: .35; cursor: default; }
+#btnLibSort.is-active { background: var(--magenta); color: #1a0613; border-color: var(--magenta); }
+.lib-sort-hint { margin: 0; font-size: .78rem; flex: 1; min-width: 12em; }
+.track-order { gap: 2px; }
+.track-order .icon-btn { font-size: 1.05rem; min-width: 34px; min-height: 34px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.track-order .icon-btn:not(:disabled):hover { background: rgba(255, 79, 180, .25); color: #fff; }
+.track-order .icon-btn:disabled { opacity: .2; cursor: default; }
+.track-no-btn { border: 0; cursor: pointer; }
+.track-no-btn:hover { background: var(--tube); color: #1f1406; }
+@keyframes trackMoved { from { background: rgba(255, 79, 180, .35); } to { background: transparent; } }
+.track.is-moved { animation: trackMoved .9s ease-out; }
+@media (max-width: 680px) {
+  .track.is-sorting { grid-template-columns: minmax(0, 1fr) auto; }
+  .track.is-sorting .track-cover { display: none; }
+  .track.is-sorting .track-title { white-space: normal; overflow: visible; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .track-order .icon-btn { min-width: 32px; min-height: 36px; padding: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
