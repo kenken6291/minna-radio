@@ -1,4 +1,4 @@
-# NEON WAVE RADIO（minna-radio）v1.1.0
+# NEON WAVE RADIO（minna-radio）v1.2.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
@@ -50,8 +50,10 @@ minna-radio/
 | RoomMembers | roomId, userId, nickname, role(host/speaker/listener), hand, lastSeen |
 | RoomMessages | id, roomId, userId, nickname, type(text/voice/ai/system), text, fileId, mimeType, persona, createdAt |
 | Personas | id, name, icon, color, gender, voice, role, description, style, prompt, ownerId, ownerName, createdAt, updatedAt |
+| Libraries | id, ownerId, name, trackIds(JSON), createdAt, updatedAt |
+| Scripts | id, ownerId, title, text, cast(JSON), createdAt, updatedAt |
 
-※ Personas シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ Personas / Libraries / Scripts シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
 
 日時はすべてミリ秒の数値（テキスト書式）で保存しています。
 
@@ -82,6 +84,14 @@ minna-radio/
 - スマホで画面を消すと YouTube は止まります（YouTube側の仕様）。Drive／外部URLの曲はロック画面の操作に対応。
 - iPhone では音量スライダーが外部URL・YouTube に効かない場合があります（端末の音量ボタンで調整）。
 - **AIパーソナリティ**は「スタジオ → パーソナリティ」で作成・編集・複製・削除できます（声30種類から選択、話し方・キャラクター設定も自由）。標準の5人は `Code.gs` の `BUILTIN_PERSONAS` にあり、画面からは編集できません（複製して使う）。
+
+## v1.2.0 の変更点
+
+- **楽曲ライブラリを 1人 20 セット**まで作って切り替えられます（ラジオ画面「楽曲ライブラリ」の選択欄）。各曲の 📁 でライブラリに入れる・外す、選択中のライブラリで「＋ 曲を追加」すると自動でそのライブラリにも入ります。「放送をはじめる」は選んでいるライブラリの曲を流します。
+- **掛け合いの台本を 1人 50 セット**までサーバーに保存できます（スマホと PC で共通）。v1.1 でブラウザに残っていた台本は「台本1」として自動で引き継ぎます。
+- **放送順**：台本ごと、またはブロックごとに「＋」で放送順に追加し、↑↓ で並べ替え、⏵ で「次はここから」を指定できます。放送順が空のときは、開いている台本を最初から流します。
+- **読み上げに指示文を入れない**：「〜として、〜読み上げてください」という文が声に出てしまう問題を解消。TTS にはセリフだけを渡します。パーソナリティの「話し方」はトークの文章を作るときの口調として使います。
+- 台本の音声キャッシュは作り直されます（初回だけ再生成）。
 
 ## v1.1.0 の新機能
 

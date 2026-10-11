@@ -1,7 +1,8 @@
 /**
  * NEON WAVE RADIO - Google Apps Script バックエンド
- * Version 1.1.0
+ * Version 1.2.0
  *   v1.1.0 パーソナリティ管理 / 台本の掛け合い（複数話者TTS） / AIとの対話（文字起こし＋声変換）
+ *   v1.2.0 楽曲ライブラリ（1人20セット） / 台本の保存（1人50セット） / 読み上げに指示文を入れない
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -14,7 +15,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -28,6 +29,10 @@ const MAX_VOICE_BYTES = 5 * 1024 * 1024;
 const MAX_STT_BYTES = 12 * 1024 * 1024;        // 文字起こし用の音声（base64前）
 const MAX_CUSTOM_PERSONAS = 20;                // 1人あたりのパーソナリティ上限
 const PERSONA_CACHE_SEC = 120;
+const MAX_LIBRARIES = 20;                      // 楽曲ライブラリ：1人あたりのセット数
+const MAX_LIBRARY_TRACKS = 500;                // 1セットの曲数
+const MAX_SCRIPTS = 50;                        // 台本：1人あたりのセット数
+const MAX_SCRIPT_CHARS = 20000;                // 台本1セットの文字数
 
 const HEAD = {
   Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
@@ -36,7 +41,9 @@ const HEAD = {
   Rooms:        ['id', 'title', 'topic', 'persona', 'hostId', 'hostName', 'status', 'createdAt', 'updatedAt'],
   RoomMembers:  ['roomId', 'userId', 'nickname', 'role', 'hand', 'lastSeen'],
   RoomMessages: ['id', 'roomId', 'userId', 'nickname', 'type', 'text', 'fileId', 'mimeType', 'persona', 'createdAt'],
-  Personas:     ['id', 'name', 'icon', 'color', 'gender', 'voice', 'role', 'description', 'style', 'prompt', 'ownerId', 'ownerName', 'createdAt', 'updatedAt']
+  Personas:     ['id', 'name', 'icon', 'color', 'gender', 'voice', 'role', 'description', 'style', 'prompt', 'ownerId', 'ownerName', 'createdAt', 'updatedAt'],
+  Libraries:    ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt'],
+  Scripts:      ['id', 'ownerId', 'title', 'text', 'cast', 'createdAt', 'updatedAt']
 };
 
 /* ============================================================
@@ -83,7 +90,7 @@ const BUILTIN_PERSONAS = [
   {
     id: 'midnight', name: 'ミッドナイト・クルーズ', icon: '🌙', color: '#7c6cff', gender: 'male', voice: 'Algenib',
     role: '深夜ラジオDJ', description: '低めの声で、ゆっくり語りかける夜のDJ',
-    style: '深夜2時のラジオDJとして、低めで落ち着いた声で、ささやくように、ゆっくりと間をとって読み上げてください。文末は優しく余韻を残して。',
+    style: '低めで落ち着いたトーン。ささやくように、ゆっくり間をとって話す。文末は優しく余韻を残す',
     prompt: [
       'あなたは深夜2時の静かなスタジオからお届けするラジオDJです。',
       'リスナーの1日の疲れを包み込むように、低めで落ち着いたトーンで、穏やかにゆっくりと語りかけてください。',
@@ -94,7 +101,7 @@ const BUILTIN_PERSONAS = [
   {
     id: 'morning', name: 'モーニング・ドライブ', icon: '☀️', color: '#ffb547', gender: 'male', voice: 'Puck',
     role: 'ハイテンションFM DJ', description: '明るく軽快に、朝を盛り上げる看板DJ',
-    style: '週末の朝のFMラジオDJとして、明るくエネルギッシュに、軽快なテンポで弾むように読み上げてください。',
+    style: '明るくエネルギッシュ。軽快なテンポで弾むように話す',
     prompt: [
       'あなたは週末の朝を最高に盛り上げるFMラジオの看板DJです！',
       '明るくエネルギッシュに、軽快なテンポでリスナーをワクワクさせてください。',
@@ -104,7 +111,7 @@ const BUILTIN_PERSONAS = [
   {
     id: 'cafe', name: 'リラックス・ラウンジ', icon: '☕', color: '#3fe0c5', gender: 'male', voice: 'Achird',
     role: 'カフェ風トークパートナー', description: '隠れ家カフェのバリスタと、ゆるっと会話',
-    style: '隠れ家カフェのバリスタとして、自然体で柔らかく、友人に話しかけるように丁寧に読み上げてください。',
+    style: '自然体で柔らかく、友人に話しかけるように丁寧に話す',
     prompt: [
       'あなたは隠れ家カフェで淹れたてのコーヒーを淹れながら会話するバリスタ兼ナビゲーターです。',
       '友人とお茶を飲んでいるような自然体で、柔らかく丁寧な語り口で話してください。',
@@ -114,7 +121,7 @@ const BUILTIN_PERSONAS = [
   {
     id: 'sunset', name: 'サンセット・ステーション', icon: '🌇', color: '#ff7a9c', gender: 'female', voice: 'Sulafat',
     role: '夕方の女性パーソナリティ', description: '温かい声で、一日の終わりに寄り添う',
-    style: '夕方のラジオパーソナリティとして、温かく包み込むように、少しゆったりしたテンポで、笑顔が伝わるように読み上げてください。',
+    style: '温かく包み込むように、少しゆったりしたテンポで、笑顔が伝わるように話す',
     prompt: [
       'あなたは夕方の帯番組を担当する、温かい雰囲気の女性ラジオパーソナリティです。',
       '仕事や家事を終えたリスナーに「お疲れさまでした」と寄り添い、季節の話題や小さな出来事を大切に語ってください。',
@@ -124,7 +131,7 @@ const BUILTIN_PERSONAS = [
   {
     id: 'breeze', name: 'ブリーズ・ナビ', icon: '🌿', color: '#7ee081', gender: 'female', voice: 'Leda',
     role: '元気な女性アシスタント', description: '若々しく明るい、番組の相棒',
-    style: 'ラジオ番組のアシスタントとして、若々しく明るく、はきはきと親しみやすく読み上げてください。',
+    style: '若々しく明るく、はきはきと親しみやすく話す',
     prompt: [
       'あなたはラジオ番組の明るいアシスタントです。',
       'メインパーソナリティの話にテンポよく相づちを打ち、ときにはツッコミも入れて番組を盛り上げてください。',
@@ -174,6 +181,14 @@ const ROUTES = {
   persona_save: personaSave_,
   persona_delete: personaDelete_,
   tts_say: ttsSay_,
+  // 楽曲ライブラリ（セット）
+  libraries_list: librariesList_,
+  library_save: librarySave_,
+  library_delete: libraryDelete_,
+  // 台本（セット）
+  scripts_list: scriptsList_,
+  script_save: scriptSave_,
+  script_delete: scriptDelete_,
   // 台本の掛け合い
   script_tts: scriptTts_,
   script_draft: scriptDraft_,
@@ -520,6 +535,7 @@ function personaInstruction_(p) {
   return 'あなたは「' + p.name + '」という名前のラジオパーソナリティです。' +
     (p.role ? '役割：' + p.role + '。' : '') +
     (p.description ? '特徴：' + p.description + '。' : '') +
+    (p.style ? '\n話し方：' + p.style : '') +
     (p.prompt ? '\n' + p.prompt : '');
 }
 
@@ -542,7 +558,7 @@ function personaSave_(req) {
     name: name, icon: icon, color: color, gender: gender, voice: voice,
     role: String(d.role || '').trim().slice(0, 40),
     description: String(d.description || '').trim().slice(0, 120),
-    style: String(d.style || '').trim().slice(0, 300) || 'ラジオパーソナリティとして、自然で聞き取りやすく読み上げてください。',
+    style: String(d.style || '').trim().slice(0, 300),
     prompt: String(d.prompt || '').trim().slice(0, 1500),
     updatedAt: now_()
   };
@@ -585,8 +601,7 @@ function ttsSay_(req) {
   if (!text) throw apiErr_('読み上げる文章がありません');
   if (req.voice) {
     if (VOICE_NAMES.indexOf(String(req.voice)) < 0) throw apiErr_('声の指定が正しくありません');
-    const style = String(req.style || '').trim().slice(0, 300) || 'ラジオパーソナリティとして、自然で聞き取りやすく読み上げてください。';
-    return { audio: ttsVoice_(String(req.voice), style, text) };
+    return { audio: ttsVoice_(String(req.voice), text) };
   }
   return { audio: tts_(personaGet_(req.persona, 'cafe'), text) };
 }
@@ -657,14 +672,13 @@ function scriptTtsCore_(lines, cast) {
   const requests = segs.map(function (seg) {
     if (seg.names.length === 1) {
       const p = pmap[seg.names[0]];
-      return geminiRequest_(model, ttsBody_(p.voice, p.style, seg.lines.map(function (l) { return l.text; }).join('\n')));
+      return geminiRequest_(model, ttsBody_(p.voice, seg.lines.map(function (l) { return l.text; }).join('\n')));
     }
     const sp = seg.names.map(function (n, i) { return { label: 'Speaker' + (i + 1), p: pmap[n] }; });
-    const head = '以下のSpeaker1とSpeaker2の会話を、ラジオ番組の掛け合いとして自然なテンポで読み上げてください。' +
-      'Speaker1の話し方は、' + sp[0].p.style + ' Speaker2の話し方は、' + sp[1].p.style;
+    // 指示文は入れず、セリフだけを渡す（指示文が読み上げられてしまうのを防ぐ）
     const script = seg.lines.map(function (l) { return sp[seg.names.indexOf(l.speaker)].label + ': ' + l.text; }).join('\n');
     return geminiRequest_(model, {
-      contents: [{ parts: [{ text: head + '\n\n' + script }] }],
+      contents: [{ parts: [{ text: script }] }],
       generationConfig: {
         responseModalities: ['AUDIO'],
         speechConfig: {
@@ -687,7 +701,7 @@ function scriptTtsCore_(lines, cast) {
       if (segs[i].names.length < 2 || /利用上限/.test(String(e.message))) throw e;
       const singles = UrlFetchApp.fetchAll(segs[i].lines.map(function (l) {
         const p = pmap[l.speaker];
-        return geminiRequest_(model, ttsBody_(p.voice, p.style, l.text));
+        return geminiRequest_(model, ttsBody_(p.voice, l.text));
       }));
       singles.forEach(function (r) { out.push(audioOf_(parseGemini_(r))); });
     }
@@ -718,6 +732,104 @@ function scriptDraft_(req) {
   const text = textOf_(gemini_(textModel_(), body)).replace(/```[a-z]*\n?/gi, '').replace(/[*#`]/g, '').trim();
   if (!text) throw apiErr_('台本を作れませんでした。もう一度お試しください');
   return { text: text };
+}
+
+/* ============================================================
+ *  楽曲ライブラリ（自分用のセット。1人20セットまで）
+ * ============================================================ */
+function parseJsonArr_(v) { try { const a = JSON.parse(String(v || '[]')); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function parseJsonObj_(v) { try { const o = JSON.parse(String(v || '{}')); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch (e) { return {}; } }
+
+function librariesList_(req) {
+  const user = auth_(req);
+  const list = readAll_('Libraries').filter(function (r) { return r.ownerId === user.userId; }).map(function (r) {
+    return { id: r.id, name: r.name, trackIds: parseJsonArr_(r.trackIds), createdAt: Number(r.createdAt), updatedAt: Number(r.updatedAt) };
+  });
+  list.sort(function (a, b) { return a.createdAt - b.createdAt; });
+  return { libraries: list, max: MAX_LIBRARIES };
+}
+
+function librarySave_(req) {
+  const user = auth_(req);
+  const d = req.library || {};
+  const name = String(d.name || '').trim().slice(0, 30);
+  if (!name) throw apiErr_('ライブラリ名を入力してください');
+  const ids = (Array.isArray(d.trackIds) ? d.trackIds : []).map(String).filter(function (x, i, a) { return /^t_\w+$/.test(x) && a.indexOf(x) === i; });
+  if (ids.length > MAX_LIBRARY_TRACKS) throw apiErr_('1つのライブラリに入れられる曲は' + MAX_LIBRARY_TRACKS + '曲までです');
+  const t = now_();
+  const out = withLock_(function () {
+    const mine = readAll_('Libraries').filter(function (r) { return r.ownerId === user.userId; });
+    if (d.id) {
+      const row = mine.filter(function (r) { return r.id === d.id; })[0];
+      if (!row) throw apiErr_('ライブラリが見つかりません');
+      update_('Libraries', row, { name: name, trackIds: JSON.stringify(ids), updatedAt: t });
+      return { id: row.id, createdAt: Number(row.createdAt) };
+    }
+    if (mine.length >= MAX_LIBRARIES) throw apiErr_('ライブラリは' + MAX_LIBRARIES + 'セットまでです');
+    const rec = { id: 'l_' + randStr_(10), ownerId: user.userId, name: name, trackIds: JSON.stringify(ids), createdAt: t, updatedAt: t };
+    append_('Libraries', rec);
+    return { id: rec.id, createdAt: t };
+  });
+  return { library: { id: out.id, name: name, trackIds: ids, createdAt: out.createdAt, updatedAt: t } };
+}
+
+function libraryDelete_(req) {
+  const user = auth_(req);
+  withLock_(function () {
+    const row = readAll_('Libraries').filter(function (r) { return r.id === req.id && r.ownerId === user.userId; })[0];
+    if (!row) throw apiErr_('ライブラリが見つかりません');
+    deleteRow_('Libraries', row);
+  });
+  return { message: 'ライブラリを削除しました（曲そのものは消えません）' };
+}
+
+/* ============================================================
+ *  台本（自分用のセット。1人50セットまで）
+ * ============================================================ */
+function scriptsList_(req) {
+  const user = auth_(req);
+  const list = readAll_('Scripts').filter(function (r) { return r.ownerId === user.userId; }).map(function (r) {
+    return { id: r.id, title: r.title, text: String(r.text || ''), cast: parseJsonObj_(r.cast), createdAt: Number(r.createdAt), updatedAt: Number(r.updatedAt) };
+  });
+  list.sort(function (a, b) { return a.createdAt - b.createdAt; });
+  return { scripts: list, max: MAX_SCRIPTS };
+}
+
+function scriptSave_(req) {
+  const user = auth_(req);
+  const d = req.script || {};
+  const title = String(d.title || '').trim().slice(0, 40) || '無題の台本';
+  const text = String(d.text || '');
+  if (text.length > MAX_SCRIPT_CHARS) throw apiErr_('台本が長すぎます（1セット' + MAX_SCRIPT_CHARS + '文字まで）');
+  const cast = {};
+  const src = d.cast && typeof d.cast === 'object' ? d.cast : {};
+  Object.keys(src).slice(0, 40).forEach(function (k) { cast[String(k).slice(0, 20)] = String(src[k] || '').slice(0, 40); });
+  const t = now_();
+  const out = withLock_(function () {
+    const mine = readAll_('Scripts').filter(function (r) { return r.ownerId === user.userId; });
+    const patch = { title: title, text: text, cast: JSON.stringify(cast), updatedAt: t };
+    if (d.id) {
+      const row = mine.filter(function (r) { return r.id === d.id; })[0];
+      if (!row) throw apiErr_('台本が見つかりません');
+      update_('Scripts', row, patch);
+      return { id: row.id, createdAt: Number(row.createdAt) };
+    }
+    if (mine.length >= MAX_SCRIPTS) throw apiErr_('台本は' + MAX_SCRIPTS + 'セットまでです');
+    const rec = Object.assign({ id: 's_' + randStr_(10), ownerId: user.userId, createdAt: t }, patch);
+    append_('Scripts', rec);
+    return { id: rec.id, createdAt: t };
+  });
+  return { script: { id: out.id, title: title, text: text, cast: cast, createdAt: out.createdAt, updatedAt: t } };
+}
+
+function scriptDelete_(req) {
+  const user = auth_(req);
+  withLock_(function () {
+    const row = readAll_('Scripts').filter(function (r) { return r.id === req.id && r.ownerId === user.userId; })[0];
+    if (!row) throw apiErr_('台本が見つかりません');
+    deleteRow_('Scripts', row);
+  });
+  return { message: '台本を削除しました' };
 }
 
 /* ============================================================
@@ -788,9 +900,10 @@ function textOf_(res) {
 
 function cleanText_(t) { return String(t || '').replace(/[*#`]/g, '').trim(); }
 
-function ttsBody_(voice, style, text) {
+/** 読み上げ本文だけを渡す（「〜として〜読み上げてください」などの指示文は付けない） */
+function ttsBody_(voice, text) {
   return {
-    contents: [{ parts: [{ text: style + '\n\n' + text }] }],
+    contents: [{ parts: [{ text: text }] }],
     generationConfig: {
       responseModalities: ['AUDIO'],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } }
@@ -799,11 +912,11 @@ function ttsBody_(voice, style, text) {
 }
 
 function tts_(p, text) {
-  return ttsVoice_(p.voice, p.style, text);
+  return ttsVoice_(p.voice, text);
 }
 
-function ttsVoice_(voice, style, text) {
-  return audioOf_(gemini_(ttsModel_(), ttsBody_(voice, style, text)));
+function ttsVoice_(voice, text) {
+  return audioOf_(gemini_(ttsModel_(), ttsBody_(voice, text)));
 }
 
 function audioOf_(res) {

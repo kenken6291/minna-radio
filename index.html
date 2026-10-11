@@ -157,6 +157,13 @@
               <h2 class="panel-title">楽曲ライブラリ</h2>
               <button class="btn btn-small btn-primary" data-add-kind="song">＋ 曲を追加</button>
             </div>
+            <div class="lib-row">
+              <select id="libSelect" aria-label="使うライブラリ"></select>
+              <button class="icon-btn" id="btnLibNew" title="新しいライブラリ" aria-label="新しいライブラリ">＋</button>
+              <button class="icon-btn" id="btnLibRename" title="名前を変える" aria-label="ライブラリの名前を変える">✎</button>
+              <button class="icon-btn" id="btnLibDelete" title="ライブラリを削除" aria-label="ライブラリを削除">🗑</button>
+              <span class="lib-count" id="libCount"></span>
+            </div>
             <div class="chips" id="songFilter">
               <button class="chip is-active" data-filter="all">すべて</button>
               <button class="chip" data-filter="ai">AI生成</button>
@@ -286,12 +293,18 @@
         <div class="script-layout">
           <section class="panel">
             <div class="panel-head">
-              <h3 class="panel-title">台本</h3>
+              <h3 class="panel-title">台本 <span class="count" id="scriptCount"></span></h3>
               <div class="panel-tools">
                 <label class="btn btn-small btn-ghost file-btn">📄 ファイルを取り込む<input type="file" id="scriptFile" accept=".txt,text/plain" hidden></label>
                 <button class="btn btn-small btn-ghost" id="btnDraft">✨ AI で下書き</button>
               </div>
             </div>
+            <div class="lib-row">
+              <select id="scriptSelect" aria-label="開く台本"></select>
+              <button class="icon-btn" id="btnScriptNew" title="新しい台本" aria-label="新しい台本">＋</button>
+              <button class="icon-btn" id="btnScriptDelete" title="この台本を削除" aria-label="この台本を削除">🗑</button>
+            </div>
+            <label class="field"><span>台本の名前</span><input type="text" id="scriptTitle" maxlength="40" placeholder="例：秋の夜の特番"></label>
             <textarea id="scriptText" class="script-text" rows="14" spellcheck="false" placeholder="健：こんばんは、ネオンウェーブ・ラジオの時間です。&#10;美奈：今夜もよろしくお願いします。さっそく1曲目、いきましょうか。&#10;---&#10;健：いい曲でしたね。&#10;美奈：サビで思わず口ずさんじゃいました。"></textarea>
             <details class="script-help">
               <summary>台本の書き方</summary>
@@ -300,11 +313,12 @@
                 <li>「---」だけの行で区切ると、そこまでが曲間1回分（1ブロック）になります。</li>
                 <li>「#」で始まる行はメモとして読み飛ばします。</li>
                 <li>話す人は何人でも大丈夫。名前ごとに好きなパーソナリティの声を割り当てられます。</li>
-                <li>メモ帳で作った .txt ファイルもそのまま取り込めます。</li>
+                <li>メモ帳で作った .txt ファイルもそのまま取り込めます（新しい台本として保存されます）。</li>
+                <li>台本は 50 セットまで保存できます。曲間に流す順番は、右側の「放送順」で組み立てます。</li>
               </ul>
             </details>
             <div class="panel-foot">
-              <button class="btn btn-primary btn-small" id="btnScriptParse">台本を読み込む</button>
+              <button class="btn btn-primary btn-small" id="btnScriptParse">💾 保存して読み込む</button>
             </div>
           </section>
 
@@ -319,6 +333,14 @@
               </div>
             </div>
             <ol class="block-list" id="blockList"></ol>
+            <button class="btn btn-small btn-ghost btn-block" id="btnAddScriptToRundown">＋ この台本を丸ごと放送順に追加</button>
+
+            <div class="panel-head block-head-row rundown-head">
+              <h3 class="panel-title">放送順（曲間に流す順番） <span class="count" id="rundownTotal"></span></h3>
+              <button class="btn btn-small btn-ghost" id="btnRundownClear">クリア</button>
+            </div>
+            <ol class="rundown" id="rundownList"></ol>
+            <p class="hint">上から順に、曲間ごとに1ブロックずつ流します。⏵ で「次はここから」、↑↓ で並べ替えできます。</p>
             <button class="btn btn-primary btn-block" id="btnUseScript">📻 ラジオの曲間で流す</button>
           </section>
         </div>
@@ -485,13 +507,26 @@
       </div>
       <label class="field"><span>役割（任意）</span><input type="text" name="prole" maxlength="40" placeholder="例：深夜番組のパーソナリティ"></label>
       <label class="field"><span>ひとこと紹介（任意）</span><input type="text" name="description" maxlength="120" placeholder="例：昭和歌謡にくわしい、聞き上手なお姉さん"></label>
-      <label class="field"><span>話し方（読み上げの指示）</span><textarea name="pstyle" rows="2" maxlength="300" placeholder="例：落ち着いた声で、ゆっくり、やさしく語りかけるように読み上げてください。"></textarea></label>
+      <label class="field"><span>話し方（トークの口調・任意）</span><textarea name="pstyle" rows="2" maxlength="300" placeholder="例：落ち着いた口調で、ゆっくりやさしく語りかける"></textarea></label>
+      <p class="hint pm-note">声そのものは「声」で決まります。話し方とキャラクター設定は、AI がトークの文章を作るときに使われ、読み上げられることはありません。</p>
       <label class="field"><span>キャラクター設定（トークの内容・性格）</span><textarea name="prompt" rows="4" maxlength="1500" placeholder="例：60代の元レコード店主。音楽の思い出話が大好きで、相手の話にはまず共感してから、自分の体験を少しだけ添えます。"></textarea></label>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
         <button type="submit" class="btn btn-primary">保存する</button>
       </div>
     </form>
+  </div>
+</div>
+
+<div class="modal" id="modalLibPick" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="lpTitle">
+    <h3 id="lpTitle">ライブラリに入れる</h3>
+    <p class="ex-target" id="lpTrack"></p>
+    <ul class="lp-list" id="lpList"></ul>
+    <div class="modal-actions modal-actions-split">
+      <button type="button" class="btn btn-ghost btn-small" id="btnLpNew">＋ 新しいライブラリを作って入れる</button>
+      <button type="button" class="btn btn-primary" data-close>閉じる</button>
+    </div>
   </div>
 </div>
 

@@ -1,7 +1,8 @@
 /**
- * NEON WAVE RADIO - app.js  v1.1.0
+ * NEON WAVE RADIO - app.js  v1.2.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
+ * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
  */
 'use strict';
 (() => {
@@ -90,7 +91,9 @@
     room: null,
     personas: [],
     voices: [],
-    script: { text: '', cast: {}, blocks: [], next: 0 },
+    script: { id: '', title: '', text: '', cast: {}, blocks: [] },   // 編集中の台本
+    scripts: [], scriptsMax: 50, scriptId: '', rundown: [], seqNext: 0, legacyScript: null,
+    libraries: [], libMax: 20, libId: '',
     convo: { me: '', ai: '', theme: '', silence: CONFIG.CONVO_SILENCE_SEC, convert: true, continuous: true, turns: [], busy: false },
     exportPrefs: Object.assign({}, CONFIG.EXPORT_DEFAULT),
     view: 'radio',
@@ -110,10 +113,12 @@
         if (['ai', 'script', 'mix', 'off'].includes(p.between.mode)) state.between.mode = p.between.mode;
         if ([1, 2, 3, 5].includes(Number(p.between.every))) state.between.every = Number(p.between.every);
       }
-      if (p.script) {
-        state.script.text = String(p.script.text || '');
-        state.script.cast = p.script.cast && typeof p.script.cast === 'object' ? p.script.cast : {};
-        state.script.blocks = parseScript(state.script.text);
+      if (p.script && p.script.text) state.legacyScript = { text: String(p.script.text), cast: p.script.cast || {} };  // v1.1 からの引き継ぎ
+      if (typeof p.libId === 'string') state.libId = p.libId;
+      if (typeof p.scriptId === 'string') state.scriptId = p.scriptId;
+      if (Array.isArray(p.rundown)) {
+        state.rundown = p.rundown.filter((x) => x && typeof x.sid === 'string')
+          .map((x) => ({ sid: x.sid, b: Number.isInteger(x.b) ? x.b : -1 })).slice(0, 200);
       }
       if (p.convo) {
         ['me', 'ai', 'theme'].forEach((k) => { if (typeof p.convo[k] === 'string') state.convo[k] = p.convo[k]; });
@@ -134,7 +139,7 @@
       localStorage.setItem(CONFIG.PREFS_KEY, JSON.stringify({
         persona: state.persona, between: state.between, fx: state.fx,
         volume: state.volume, shuffle: state.shuffle, loop: state.loop,
-        script: { text: state.script.text, cast: state.script.cast },
+        libId: state.libId, scriptId: state.scriptId, rundown: state.rundown,
         convo: {
           me: state.convo.me, ai: state.convo.ai, theme: state.convo.theme, silence: state.convo.silence,
           convert: state.convo.convert, continuous: state.convo.continuous
@@ -343,6 +348,8 @@
     state.appStarted = true;
     loadPersonas();
     loadTracks();
+    loadLibraries();
+    loadScripts();
     const hash = location.hash.replace('#', '');
     showView(VIEWS.includes(hash) ? hash : 'radio');
   }
@@ -1004,7 +1011,7 @@
     state.persona = pick(state.persona, 'midnight');
     state.convo.me = pick(state.convo.me, 'cafe');
     state.convo.ai = pick(state.convo.ai, 'sunset');
-    if (state.script.blocks.length) state.script.cast = autoCast(scriptSpeakers());
+    if (state.script.blocks.length) syncAutoCast();
   }
 
   function renderPersonas() {
@@ -1032,16 +1039,37 @@
   /* =========================================================
    *  曲間トーク（AI DJ ／ 台本の掛け合い）
    * ========================================================= */
-  function scriptRemaining() { return state.script.blocks.length - state.script.next; }
+  const scriptById = (id) => state.scripts.find((x) => x.id === id);
+  function blocksOf(sc) {
+    if (!sc) return [];
+    if (sc._src !== sc.text) { sc._src = sc.text; sc._blocks = parseScript(sc.text); }
+    return sc._blocks;
+  }
+
+  /** 曲間に流すブロックの並び（放送順。空なら開いている台本を最初から） */
+  function betweenSeq() {
+    const items = state.rundown.length ? state.rundown : (state.scriptId ? [{ sid: state.scriptId, b: -1 }] : []);
+    const out = [];
+    items.forEach((it, ri) => {
+      const sc = scriptById(it.sid);
+      if (!sc) return;
+      const bs = blocksOf(sc);
+      const add = (bi) => out.push({ sid: sc.id, bi, block: bs[bi], cast: sc.cast || {}, title: sc.title, ri });
+      if (it.b < 0) bs.forEach((_, bi) => add(bi));
+      else if (bs[it.b]) add(it.b);
+    });
+    return out;
+  }
+  function scriptRemaining() { return betweenSeq().length - state.seqNext; }
 
   /** 次の曲間に何を流すか */
   function pickBetween() {
     const m = state.between.mode;
-    if ((m === 'script' || m === 'mix') && scriptRemaining() > 0) return { kind: 'script', block: state.script.next };
+    if ((m === 'script' || m === 'mix') && scriptRemaining() > 0) return { kind: 'script', pos: state.seqNext };
     if (m === 'ai' || m === 'mix') return { kind: 'ai' };
     return null;
   }
-  const planKey = (plan, from, to) => `${plan.kind}:${plan.block == null ? '' : plan.block}:${from}:${to}`;
+  const planKey = (plan, from, to) => `${plan.kind}:${plan.pos == null ? '' : plan.pos}:${from}:${to}`;
 
   function betweenCtx(fromIdx, toIdx) {
     const a = state.queue[fromIdx] || {}, b = state.queue[toIdx] || {};
@@ -1059,19 +1087,24 @@
     return { buffer, who: `${p.icon} ${p.name}`, text: r.text, title: `${p.name}のトーク`, artist: p.name, lcd: `${p.name} ON AIR` };
   }
 
-  async function blockSegment(i) {
-    const b = state.script.blocks[i];
+  async function makeBlockSegment(b, cast, title, seqPos) {
     if (!b) throw new Error('台本のブロックが見つかりません');
-    const buffer = await getBlockBuffer(b);
+    const buffer = await getBlockBuffer(b, cast);
     return {
       buffer, who: `🎙 ${castLabel(b)}`, text: blockText(b),
-      title: `掛け合い ${i + 1}`, artist: castLabel(b), lcd: '掛け合いトーク ON AIR', blockIndex: i
+      title, artist: castLabel(b), lcd: '掛け合いトーク ON AIR', seqPos
     };
+  }
+
+  function seqSegment(pos) {
+    const e = betweenSeq()[pos];
+    if (!e) return Promise.reject(new Error('放送順のブロックが見つかりません'));
+    return makeBlockSegment(e.block, e.cast, `${e.title} ${e.bi + 1}`, pos);
   }
 
   function requestSegment(plan, ctxInfo) {
     const p = plan.kind === 'script'
-      ? blockSegment(plan.block)
+      ? seqSegment(plan.pos)
       : api('dj_talk', { persona: state.persona, context: ctxInfo }).then(aiSegment);
     p.catch(() => {});
     return p;
@@ -1099,10 +1132,11 @@
       state.lastSegment = seg;
       showCaption(seg.who, seg.text, false);
       setLcd(seg.lcd);
-      if (seg.blockIndex != null) {
-        state.script.next = Math.max(state.script.next, seg.blockIndex + 1);
+      if (seg.seqPos != null) {
+        state.seqNext = Math.max(state.seqNext, seg.seqPos + 1);
         renderScriptStatus();
         renderBlocks();
+        renderRundown();
       }
       if (overMusic) duck(true);
       await playJingle();
@@ -1132,19 +1166,23 @@
 
   async function startRadio() {
     unlockMedia();
-    const songs = state.tracks.filter((t) => t.kind === 'song');
+    const songs = librarySongs();
     if (!songs.length) {
+      if (state.libId) { toast('このライブラリにはまだ曲がありません', true); return; }
       toast('まずは曲を登録しましょう');
       openAddTrack('song');
       return;
     }
+    const lib = libById(state.libId);
+    if (lib) toast(`ライブラリ「${lib.name}」を放送します`);
     const start = state.shuffle ? Math.floor(Math.random() * songs.length) : 0;
     state.queue = songs;
     state.playedCount = 0;
     state.segPrefetch = null;
-    state.script.next = 0;
+    state.seqNext = 0;
     renderScriptStatus();
     renderBlocks();
+    renderRundown();
     if (state.between.mode !== 'off' && !state.djBusy) {
       const plan = pickBetween();
       if (plan) await performSegment(requestSegment(plan, { mode: 'opening' }), false);
@@ -1155,14 +1193,16 @@
   function renderScriptStatus() {
     const el = $('#scriptStatus');
     if (!el) return;
-    const n = state.script.blocks.length;
+    const seq = betweenSeq();
+    const n = seq.length;
     const m = state.between.mode;
     if (m === 'off') { el.textContent = '曲間には何も入れません'; return; }
     if (m === 'ai') { el.textContent = `${personaById(state.persona).name} が${state.between.every === 1 ? '毎曲' : state.between.every + '曲ごとに'}しゃべります`; return; }
-    if (!n) { el.textContent = '台本がまだありません。スタジオの「掛け合い台本」で取り込めます'; return; }
-    const rest = scriptRemaining();
+    if (!n) { el.textContent = '台本がまだありません。スタジオの「掛け合い台本」で作れます'; return; }
+    const rest = n - state.seqNext;
+    const e = seq[state.seqNext];
     el.textContent = rest > 0
-      ? `台本 ${n} ブロック中、次は ${state.script.next + 1} 番目を流します`
+      ? `放送順 ${n} ブロック中、次は ${state.seqNext + 1} 番目（${e.title} の ${e.bi + 1}）を流します`
       : (m === 'mix' ? '台本はすべて流しました。この先は AI DJ がしゃべります' : '台本はすべて流しました（放送をはじめ直すと最初から）');
   }
 
@@ -1246,6 +1286,8 @@
         </div>
         <div class="track-actions">
           <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
+          ${t.kind === 'song' ? `<button class="icon-btn" data-libpick="${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
+          ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
           ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
         </div>
@@ -1254,8 +1296,130 @@
 
   const lists = { songs: [], shows: {} };
 
+  /* ---------- 楽曲ライブラリ（セット） ---------- */
+  const libById = (id) => state.libraries.find((l) => l.id === id);
+
+  /** 選んでいるライブラリの曲（「すべての曲」なら全曲） */
+  function librarySongs() {
+    const all = state.tracks.filter((t) => t.kind === 'song');
+    const lib = libById(state.libId);
+    if (!lib) return all;
+    const map = new Map(all.map((t) => [t.id, t]));
+    return lib.trackIds.map((id) => map.get(id)).filter(Boolean);
+  }
+
+  async function loadLibraries() {
+    try {
+      const d = await api('libraries_list');
+      state.libraries = d.libraries || [];
+      state.libMax = d.max || 20;
+    } catch (e) { toast(e.message, true); }
+    if (state.libId && !libById(state.libId)) state.libId = '';
+    renderLibSelect();
+    renderSongs();
+  }
+
+  function renderLibSelect() {
+    const total = state.tracks.filter((t) => t.kind === 'song').length;
+    const sel = $('#libSelect');
+    sel.innerHTML = `<option value="">すべての曲（${total}）</option>` +
+      state.libraries.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}（${l.trackIds.length}）</option>`).join('');
+    sel.value = state.libId;
+    $('#libCount').textContent = `${state.libraries.length} / ${state.libMax}`;
+    $('#btnLibRename').disabled = !state.libId;
+    $('#btnLibDelete').disabled = !state.libId;
+  }
+
+  async function saveLibrary(lib) {
+    const d = await api('library_save', { library: { id: lib.id, name: lib.name, trackIds: lib.trackIds } });
+    const i = state.libraries.findIndex((l) => l.id === d.library.id);
+    if (i >= 0) state.libraries[i] = d.library; else state.libraries.push(d.library);
+    renderLibSelect();
+    return d.library;
+  }
+
+  async function createLibrary(withTrackId) {
+    if (state.libraries.length >= state.libMax) { toast(`ライブラリは ${state.libMax} セットまでです`, true); return null; }
+    const name = (prompt('新しいライブラリの名前', `ライブラリ ${state.libraries.length + 1}`) || '').trim();
+    if (!name) return null;
+    try {
+      const lib = await saveLibrary({ name, trackIds: withTrackId ? [withTrackId] : [] });
+      toast(`ライブラリ「${lib.name}」を作りました`);
+      return lib;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  async function toggleTrackInLib(lib, trackId, on) {
+    const ids = lib.trackIds.filter((x) => x !== trackId);
+    if (on) ids.push(trackId);
+    const before = lib.trackIds;
+    lib.trackIds = ids;
+    try { await saveLibrary(lib); } catch (e) { lib.trackIds = before; toast(e.message, true); }
+    renderSongs();
+  }
+
+  function openLibPick(trackId) {
+    const t = state.tracks.find((x) => x.id === trackId);
+    if (!t) return;
+    $('#lpTrack').textContent = t.title;
+    $('#modalLibPick').dataset.track = trackId;
+    renderLibPick();
+    openModal('modalLibPick');
+  }
+
+  function renderLibPick() {
+    const tid = $('#modalLibPick').dataset.track;
+    $('#lpList').innerHTML = state.libraries.length ? state.libraries.map((l) => `
+      <li><label class="lp-item"><input type="checkbox" data-lp="${esc(l.id)}"${l.trackIds.includes(tid) ? ' checked' : ''}>
+        <span class="lp-name">${esc(l.name)}</span><span class="lp-count">${l.trackIds.length}曲</span></label></li>`).join('')
+      : '<li class="empty">ライブラリはまだありません</li>';
+  }
+
+  function bindLibrarySets() {
+    $('#libSelect').addEventListener('change', (e) => {
+      state.libId = e.target.value;
+      savePrefs();
+      renderLibSelect();
+      renderSongs();
+    });
+    $('#btnLibNew').addEventListener('click', async () => {
+      const lib = await createLibrary();
+      if (lib) { state.libId = lib.id; savePrefs(); renderLibSelect(); renderSongs(); }
+    });
+    $('#btnLibRename').addEventListener('click', async () => {
+      const lib = libById(state.libId);
+      if (!lib) return;
+      const name = (prompt('ライブラリの名前', lib.name) || '').trim();
+      if (!name || name === lib.name) return;
+      try { await saveLibrary(Object.assign({}, lib, { name })); toast('名前を変えました'); } catch (e) { toast(e.message, true); }
+    });
+    $('#btnLibDelete').addEventListener('click', async () => {
+      const lib = libById(state.libId);
+      if (!lib || !confirm(`ライブラリ「${lib.name}」を削除しますか？（曲そのものは消えません）`)) return;
+      try {
+        const d = await api('library_delete', { id: lib.id });
+        state.libraries = state.libraries.filter((l) => l.id !== lib.id);
+        state.libId = '';
+        savePrefs();
+        renderLibSelect();
+        renderSongs();
+        toast(d.message);
+      } catch (e) { toast(e.message, true); }
+    });
+    $('#lpList').addEventListener('change', (e) => {
+      const cb = e.target.closest('[data-lp]');
+      const lib = cb && libById(cb.dataset.lp);
+      if (!lib) return;
+      toggleTrackInLib(lib, $('#modalLibPick').dataset.track, cb.checked).then(renderLibPick);
+    });
+    $('#btnLpNew').addEventListener('click', async () => {
+      const lib = await createLibrary($('#modalLibPick').dataset.track);
+      if (lib) { renderLibPick(); renderSongs(); }
+    });
+  }
+
   function renderSongs() {
-    let songs = state.tracks.filter((t) => t.kind === 'song');
+    let songs = librarySongs();
     const f = state.songFilter;
     if (f === 'ai') songs = songs.filter((t) => t.aiGenerated);
     if (f === 'youtube') songs = songs.filter((t) => t.source === 'youtube');
@@ -1263,8 +1427,11 @@
     lists.songs = songs;
     $('#songList').innerHTML = songs.length
       ? songs.map((t, i) => trackItemHtml(t, 'songs', i)).join('')
-      : '<li class="empty">まだ曲がありません。「＋ 曲を追加」から登録できます</li>';
+      : (state.libId
+        ? '<li class="empty">このライブラリにはまだ曲がありません。「すべての曲」から 📁 で入れられます</li>'
+        : '<li class="empty">まだ曲がありません。「＋ 曲を追加」から登録できます</li>');
     markCurrentInLists();
+    if ($('#libSelect')) renderLibSelect();
   }
 
   function renderPodcasts() {
@@ -1329,6 +1496,10 @@
       if (del) { deleteTrack(del.dataset.del); return; }
       const ex = e.target.closest('[data-export]');
       if (ex) { exportTrack(ex.dataset.export); return; }
+      const lp = e.target.closest('[data-libpick]');
+      if (lp) { openLibPick(lp.dataset.libpick); return; }
+      const lo = e.target.closest('[data-libout]');
+      if (lo) { const lib = libById(state.libId); if (lib) toggleTrackInLib(lib, lo.dataset.libout, false); return; }
       const add = e.target.closest('[data-add-kind]');
       if (add) openAddTrack(add.dataset.addKind);
     });
@@ -1348,6 +1519,7 @@
     });
     $('#atSource').addEventListener('change', updateAddSource);
     $('#addTrackForm').addEventListener('submit', submitAddTrack);
+    bindLibrarySets();
   }
 
   let addKind = 'song';
@@ -1407,7 +1579,13 @@
       try {
         if (src === 'upload') payload.fileBase64 = await blobToBase64(f.file.files[0]);
         const d = await api('track_add', payload);
-        toast(d.message);
+        const lib = libById(state.libId);
+        if (lib && addKind === 'song' && d.track) {
+          try { await saveLibrary(Object.assign({}, lib, { trackIds: lib.trackIds.concat(d.track.id) })); } catch (e2) { /* 全曲には登録済み */ }
+          toast(`${d.message}（ライブラリ「${lib.name}」にも追加）`);
+        } else {
+          toast(d.message);
+        }
         closeModal('modalAddTrack');
         await loadTracks();
       } catch (err) { toast(err.message, true); }
@@ -2221,7 +2399,7 @@
   }
 
   /* =========================================================
-   *  台本の掛け合い
+   *  台本の掛け合い（1人50セットまで保存・放送順を指定）
    * ========================================================= */
   /** 「名前：セリフ」形式のテキストをブロック（曲間1回分）に分ける */
   function parseScript(text) {
@@ -2251,6 +2429,7 @@
   function autoCast(speakers) {
     const cast = {};
     const old = state.script.cast || {};
+    if (!state.personas.length) return Object.assign({}, old);
     const males = state.personas.filter((p) => p.gender === 'male');
     const females = state.personas.filter((p) => p.gender === 'female');
     const used = new Set();
@@ -2272,9 +2451,9 @@
     return cast;
   }
 
-  const castFor = (b) => {
+  const castFor = (b, cast) => {
     const c = {};
-    b.lines.forEach((l) => { c[l.speaker] = state.script.cast[l.speaker]; });
+    b.lines.forEach((l) => { c[l.speaker] = cast[l.speaker]; });
     return c;
   };
   const castLabel = (b) => [...new Set(b.lines.map((l) => l.speaker))].join(' × ');
@@ -2289,21 +2468,20 @@
     }
     return h1.toString(36) + h2.toString(36) + s.length.toString(36);
   }
-  const blockKey = (b) => 'blk_' + hashStr(JSON.stringify(b.lines.map((l) => {
-    const p = personaById(state.script.cast[l.speaker]);
-    return [l.speaker, l.text, p.voice, p.style];
-  })));
+  // 声（voice）が変わったら作り直す。v1.2.0 から指示文なしで読み上げるのでキーを更新
+  const blockKey = (b, cast) => 'blk2_' + hashStr(JSON.stringify(b.lines.map((l) => [l.speaker, l.text, personaById(cast[l.speaker]).voice])));
 
   const blockBufCache = new Map();
   const blockReady = new Set();
 
-  function getBlockBuffer(b) {
-    const key = blockKey(b);
+  function getBlockBuffer(b, cast) {
+    cast = cast || state.script.cast;
+    const key = blockKey(b, cast);
     if (blockBufCache.has(key)) return blockBufCache.get(key);
     const p = (async () => {
       let data = await idb.get(key);
       if (!data || !data.segments) {
-        const d = await api('script_tts', { lines: b.lines, cast: castFor(b) });
+        const d = await api('script_tts', { lines: b.lines, cast: castFor(b, cast) });
         data = { segments: d.segments, gapMs: d.gapMs };
         idb.set(key, data);
       }
@@ -2318,6 +2496,122 @@
     return p;
   }
 
+  /* ---------- 台本セットの読み込み・保存 ---------- */
+  let castSaveTimer = null;
+
+  async function loadScripts() {
+    try {
+      const d = await api('scripts_list');
+      state.scripts = d.scripts || [];
+      state.scriptsMax = d.max || 50;
+    } catch (e) { toast(e.message, true); }
+    // v1.1 でブラウザに残っていた台本を、最初の1セットとして保存
+    if (!state.scripts.length && state.legacyScript && state.legacyScript.text.trim()) {
+      try {
+        const d = await api('script_save', { script: { title: '台本1', text: state.legacyScript.text, cast: state.legacyScript.cast } });
+        state.scripts.push(d.script);
+      } catch (e) { /* noop */ }
+    }
+    state.legacyScript = null;
+    state.rundown = state.rundown.filter((it) => scriptById(it.sid));
+    if (!scriptById(state.scriptId)) state.scriptId = state.scripts.length ? state.scripts[0].id : '';
+    openScript(state.scriptId, true);
+    savePrefs();
+  }
+
+  function scriptDirty() {
+    const ta = $('#scriptText');
+    return !!ta && (ta.value !== state.script.text || $('#scriptTitle').value.trim() !== state.script.title);
+  }
+
+  function openScript(id, silent) {
+    const sc = scriptById(id);
+    state.scriptId = sc ? sc.id : '';
+    state.script = sc
+      ? { id: sc.id, title: sc.title, text: sc.text, cast: Object.assign({}, sc.cast), blocks: parseScript(sc.text) }
+      : { id: '', title: '', text: '', cast: {}, blocks: [] };
+    if (state.script.blocks.length) syncAutoCast();
+    $('#scriptText').value = state.script.text;
+    $('#scriptTitle').value = state.script.title;
+    if (!state.rundown.length) state.seqNext = 0;
+    state.segPrefetch = null;
+    if (!silent) savePrefs();
+    renderScriptSelect();
+    renderCast();
+    renderBlocks();
+    renderRundown();
+    renderScriptStatus();
+  }
+
+  function renderScriptSelect() {
+    const sel = $('#scriptSelect');
+    if (!sel) return;
+    sel.innerHTML = state.scripts.length
+      ? state.scripts.map((x) => `<option value="${esc(x.id)}">${esc(x.title)}（${blocksOf(x).length}ブロック）</option>`).join('')
+      : '<option value="">（台本はまだありません）</option>';
+    sel.value = state.scriptId;
+    $('#scriptCount').textContent = `${state.scripts.length} / ${state.scriptsMax}`;
+    $('#btnScriptDelete').disabled = !state.scriptId;
+  }
+
+  function storeScript(sc) {
+    const i = state.scripts.findIndex((x) => x.id === sc.id);
+    if (i >= 0) state.scripts[i] = sc; else state.scripts.push(sc);
+  }
+
+  /** 新しい台本セットを作って開く */
+  async function createScript(title, text, cast) {
+    if (state.scripts.length >= state.scriptsMax) { toast(`台本は ${state.scriptsMax} セットまでです。いらない台本を削除してください`, true); return null; }
+    const d = await api('script_save', { script: { title, text, cast: cast || {} } });
+    storeScript(d.script);
+    openScript(d.script.id);
+    return d.script;
+  }
+
+  /** 編集中の台本を保存して読み込み直す */
+  async function saveCurrentScript(btn) {
+    const text = $('#scriptText').value;
+    const title = $('#scriptTitle').value.trim() || state.script.title || `台本${state.scripts.length + 1}`;
+    const blocks = parseScript(text);
+    state.script.text = text;
+    state.script.title = title;
+    state.script.blocks = blocks;
+    state.script.cast = autoCast(scriptSpeakers());
+    const run = async () => {
+      try {
+        if (!state.script.id) {
+          await createScript(title, text, state.script.cast);
+        } else {
+          const d = await api('script_save', { script: { id: state.script.id, title, text, cast: state.script.cast } });
+          storeScript(d.script);
+          openScript(d.script.id);
+        }
+        if (blocks.length) toast(`保存しました（${blocks.length} ブロック・${scriptSpeakers().length} 人）`);
+        else toast('保存しました。セリフは「名前：セリフ」の形で書いてください', true);
+      } catch (e) { toast(e.message, true); }
+    };
+    if (btn) await withBusy(btn, '保存中…', run); else await run();
+  }
+
+  /** 配役が決まっていない話し手に声を割り当て、変わったら保存する */
+  function syncAutoCast() {
+    const before = JSON.stringify(state.script.cast);
+    state.script.cast = autoCast(scriptSpeakers());
+    if (state.personas.length && state.script.id && JSON.stringify(state.script.cast) !== before) scheduleCastSave();
+  }
+
+  function scheduleCastSave() {
+    const sc = scriptById(state.script.id);
+    if (!sc) return;
+    sc.cast = Object.assign({}, state.script.cast);
+    clearTimeout(castSaveTimer);
+    castSaveTimer = setTimeout(async () => {
+      try { await api('script_save', { script: { id: sc.id, title: sc.title, text: sc.text, cast: sc.cast } }); }
+      catch (e) { toast('配役を保存できませんでした：' + e.message, true); }
+    }, 700);
+  }
+
+  /* ---------- 表示 ---------- */
   function renderCast() {
     const ul = $('#castList');
     if (!ul) return;
@@ -2329,18 +2623,20 @@
         <span class="cast-name">${esc(sp)}</span>
         <select data-cast="${esc(sp)}" aria-label="${esc(sp)} の声">${personaOptions(state.script.cast[sp])}</select>
       </li>`;
-    }).join('') : '<li class="empty">台本を読み込むと、話す人ごとに声を選べます</li>';
+    }).join('') : '<li class="empty">台本を保存すると、話す人ごとに声を選べます</li>';
   }
 
   function renderBlocks() {
     const ol = $('#blockList');
     if (!ol) return;
     const bs = state.script.blocks;
+    const cast = state.script.cast;
+    const cur = betweenSeq()[state.seqNext];
     $('#blockCount').textContent = bs.length ? `${bs.length}` : '';
     ol.innerHTML = bs.length ? bs.map((b, i) => {
-      const ready = blockReady.has(blockKey(b));
-      const cls = i < state.script.next ? 'is-done' : i === state.script.next ? 'is-next' : '';
-      return `<li class="block ${cls}">
+      const ready = blockReady.has(blockKey(b, cast));
+      const isNext = cur && cur.sid === state.script.id && cur.bi === i;
+      return `<li class="block${isNext ? ' is-next' : ''}">
         <div class="block-head">
           <span class="block-no">${i + 1}</span>
           <span class="block-cast">${esc(castLabel(b))}</span>
@@ -2348,14 +2644,14 @@
           <span class="block-actions">
             <button class="icon-btn" data-bplay="${i}" title="試聴" aria-label="ブロック${i + 1}を試聴">▶</button>
             <button class="icon-btn" data-bexport="${i}" title="書き出す" aria-label="ブロック${i + 1}を書き出す">⬇</button>
-            <button class="icon-btn" data-bfrom="${i}" title="次にこのブロックを流す" aria-label="次にブロック${i + 1}を流す">⤴</button>
+            <button class="icon-btn" data-badd="${i}" title="放送順に追加" aria-label="ブロック${i + 1}を放送順に追加">＋</button>
           </span>
         </div>
         <p class="block-lines">${b.lines.map((l) => `<b>${esc(l.speaker)}</b>${esc(l.text)}`).join('<br>')}</p>
       </li>`;
     }).join('') : '<li class="empty">まだブロックがありません</li>';
     bs.forEach((b, i) => {
-      const key = blockKey(b);
+      const key = blockKey(b, cast);
       if (blockReady.has(key)) return;
       idb.has(key).then((ok) => {
         const el = ol.querySelector(`[data-bstate="${i}"]`);
@@ -2364,21 +2660,61 @@
     });
   }
 
-  function applyScript(text, silent) {
-    const blocks = parseScript(text);
-    state.script.text = text;
-    state.script.blocks = blocks;
-    state.script.next = 0;
+  /** 放送順（曲間に流す順番） */
+  function renderRundown() {
+    const ol = $('#rundownList');
+    if (!ol) return;
+    const seq = betweenSeq();
+    const cur = seq[state.seqNext];
+    if (!state.rundown.length) {
+      const sc = scriptById(state.scriptId);
+      ol.innerHTML = `<li class="empty rd-empty">${sc
+        ? `放送順が空のときは、開いている台本「${esc(sc.title)}」を最初から順に流します`
+        : '台本のブロックの「＋」で、曲間に流す順番を組み立てられます'}</li>`;
+      $('#rundownTotal').textContent = '';
+      return;
+    }
+    $('#rundownTotal').textContent = `${seq.length} ブロック`;
+    ol.innerHTML = state.rundown.map((it, ri) => {
+      const sc = scriptById(it.sid);
+      const bs = blocksOf(sc);
+      const items = seq.filter((e) => e.ri === ri);
+      const first = seq.indexOf(items[0]);
+      const done = items.length && seq.indexOf(items[items.length - 1]) < state.seqNext;
+      const isNext = cur && cur.ri === ri;
+      const what = !sc ? '（削除された台本）'
+        : it.b < 0 ? `全 ${bs.length} ブロック`
+        : bs[it.b] ? `ブロック ${it.b + 1}（${esc(castLabel(bs[it.b]))}）` : '（ブロックがありません）';
+      return `<li class="rd${isNext ? ' is-next' : ''}${done ? ' is-done' : ''}">
+        <span class="rd-no">${ri + 1}</span>
+        <div class="rd-main"><b>${esc(sc ? sc.title : '—')}</b><span>${what}${isNext && it.b < 0 ? `・次は ${cur.bi + 1}` : ''}</span></div>
+        <span class="rd-actions">
+          <button class="icon-btn" data-rfrom="${first}" title="次はここから" aria-label="次はここから"${items.length ? '' : ' disabled'}>⏵</button>
+          <button class="icon-btn" data-rup="${ri}" title="上へ" aria-label="上へ"${ri === 0 ? ' disabled' : ''}>↑</button>
+          <button class="icon-btn" data-rdown="${ri}" title="下へ" aria-label="下へ"${ri === state.rundown.length - 1 ? ' disabled' : ''}>↓</button>
+          <button class="icon-btn" data-rdel="${ri}" title="放送順から外す" aria-label="放送順から外す">✕</button>
+        </span>
+      </li>`;
+    }).join('');
+  }
+
+  function rundownChanged() {
     state.segPrefetch = null;
-    state.script.cast = autoCast(scriptSpeakers());
+    state.seqNext = Math.min(state.seqNext, betweenSeq().length);
     savePrefs();
-    renderCast();
+    renderRundown();
     renderBlocks();
     renderScriptStatus();
-    if (!silent) {
-      if (blocks.length) toast(`${blocks.length} ブロック・${scriptSpeakers().length} 人の台本を読み込みました`);
-      else toast('「名前：セリフ」の形で書いてください', true);
-    }
+    maybePrefetchSegment();
+  }
+
+  function addToRundown(b) {
+    if (!state.script.id) { toast('先に台本を保存してください', true); return; }
+    if (scriptDirty()) { toast('台本に保存していない変更があります。先に保存してください', true); return; }
+    if (state.rundown.length >= 200) { toast('放送順は200件までです', true); return; }
+    state.rundown.push({ sid: state.script.id, b });
+    rundownChanged();
+    toast(b < 0 ? `「${state.script.title}」を放送順に追加しました` : `ブロック ${b + 1} を放送順に追加しました`);
   }
 
   async function readTextFile(file) {
@@ -2392,57 +2728,101 @@
 
   function bindScriptStudio() {
     const ta = $('#scriptText');
-    ta.value = state.script.text;
-    $('#btnScriptParse').addEventListener('click', () => applyScript(ta.value));
+    $('#btnScriptParse').addEventListener('click', (e) => saveCurrentScript(e.currentTarget));
+    $('#scriptSelect').addEventListener('change', (e) => {
+      if (scriptDirty() && !confirm('保存していない変更があります。破棄して切り替えますか？')) { e.target.value = state.scriptId; return; }
+      openScript(e.target.value);
+    });
+    $('#btnScriptNew').addEventListener('click', async (e) => {
+      if (scriptDirty() && !confirm('保存していない変更があります。破棄して新しい台本を作りますか？')) return;
+      const title = (prompt('新しい台本の名前', `台本${state.scripts.length + 1}`) || '').trim();
+      if (!title) return;
+      await withBusy(e.currentTarget, '作成中…', async () => {
+        try { await createScript(title, '', {}); ta.focus(); } catch (err) { toast(err.message, true); }
+      });
+    });
+    $('#btnScriptDelete').addEventListener('click', async () => {
+      const sc = scriptById(state.scriptId);
+      if (!sc || !confirm(`台本「${sc.title}」を削除しますか？（放送順からも外れます）`)) return;
+      try {
+        const d = await api('script_delete', { id: sc.id });
+        state.scripts = state.scripts.filter((x) => x.id !== sc.id);
+        state.rundown = state.rundown.filter((it) => it.sid !== sc.id);
+        openScript(state.scripts.length ? state.scripts[0].id : '');
+        rundownChanged();
+        toast(d.message);
+      } catch (err) { toast(err.message, true); }
+    });
     $('#scriptFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       e.target.value = '';
       if (!file) return;
       if (file.size > 300 * 1024) { toast('テキストファイルが大きすぎます（300KBまで）', true); return; }
-      ta.value = await readTextFile(file);
-      applyScript(ta.value);
+      const text = await readTextFile(file);
+      try {
+        const sc = await createScript(file.name.replace(/\.[^.]+$/, '').slice(0, 40), text, {});
+        if (sc) await saveCurrentScript();   // 配役を自動で決めて保存
+      } catch (err) { toast(err.message, true); }
     });
     $('#castList').addEventListener('change', (e) => {
       const s = e.target.closest('[data-cast]');
       if (!s) return;
       state.script.cast[s.dataset.cast] = s.value;
       state.segPrefetch = null;
-      savePrefs();
+      scheduleCastSave();
       renderCast();
       renderBlocks();
     });
     $('#blockList').addEventListener('click', (e) => {
       const play = e.target.closest('[data-bplay]');
       const ex = e.target.closest('[data-bexport]');
-      const from = e.target.closest('[data-bfrom]');
+      const add = e.target.closest('[data-badd]');
+      const b = (el, k) => state.script.blocks[Number(el.dataset[k])];
       if (play) {
         unlockMedia();
         const i = Number(play.dataset.bplay);
-        performSegment(blockSegment(i).then((s) => Object.assign(s, { blockIndex: null })), state.playing, '🎙 掛け合い（試聴）')
+        performSegment(makeBlockSegment(b(play, 'bplay'), state.script.cast, `${state.script.title} ${i + 1}`), state.playing, '🎙 掛け合い（試聴）')
           .then(() => renderBlocks());
       }
       if (ex) {
         const i = Number(ex.dataset.bexport);
-        const b = state.script.blocks[i];
-        openExport({ title: `掛け合い ${i + 1}（${castLabel(b)}）`, artist: castLabel(b), mono: true, getBuffer: () => getBlockBuffer(b) });
+        const blk = b(ex, 'bexport');
+        const cast = Object.assign({}, state.script.cast);
+        openExport({ title: `${state.script.title || '掛け合い'} ${i + 1}（${castLabel(blk)}）`, artist: castLabel(blk), mono: true, getBuffer: () => getBlockBuffer(blk, cast) });
       }
-      if (from) {
-        state.script.next = Number(from.dataset.bfrom);
-        state.segPrefetch = null;
-        renderBlocks();
-        renderScriptStatus();
-        toast(`次の曲間でブロック ${state.script.next + 1} を流します`);
-      }
+      if (add) addToRundown(Number(add.dataset.badd));
+    });
+    $('#btnAddScriptToRundown').addEventListener('click', () => {
+      if (!state.script.blocks.length) { toast('この台本にはまだブロックがありません', true); return; }
+      addToRundown(-1);
+    });
+    $('#rundownList').addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn || btn.disabled) return;
+      const d = btn.dataset;
+      const r = state.rundown;
+      if (d.rup != null) { const i = Number(d.rup); [r[i - 1], r[i]] = [r[i], r[i - 1]]; }
+      else if (d.rdown != null) { const i = Number(d.rdown); [r[i + 1], r[i]] = [r[i], r[i + 1]]; }
+      else if (d.rdel != null) { r.splice(Number(d.rdel), 1); }
+      else if (d.rfrom != null) { state.seqNext = Number(d.rfrom); toast(`次の曲間は放送順の ${state.seqNext + 1} 番目のブロックから流します`); }
+      else return;
+      rundownChanged();
+    });
+    $('#btnRundownClear').addEventListener('click', () => {
+      if (!state.rundown.length || !confirm('放送順をすべてクリアしますか？（台本は消えません）')) return;
+      state.rundown = [];
+      state.seqNext = 0;
+      rundownChanged();
     });
     $('#btnGenAll').addEventListener('click', async (e) => {
       const btn = e.currentTarget;
       const bs = state.script.blocks;
-      if (!bs.length) { toast('先に台本を読み込んでください', true); return; }
+      if (!bs.length) { toast('先に台本を保存してください', true); return; }
       btn.disabled = true;
       try {
         for (let i = 0; i < bs.length; i++) {
           btn.textContent = `生成中 ${i + 1}/${bs.length}`;
-          await getBlockBuffer(bs[i]);
+          await getBlockBuffer(bs[i], state.script.cast);
           renderBlocks();
         }
         toast('すべてのブロックの音声ができました');
@@ -2454,22 +2834,23 @@
       }
     });
     $('#btnExportAllBlocks').addEventListener('click', () => {
-      const bs = state.script.blocks;
-      if (!bs.length) { toast('先に台本を読み込んでください', true); return; }
+      const bs = state.script.blocks.slice();
+      const cast = Object.assign({}, state.script.cast);
+      if (!bs.length) { toast('先に台本を保存してください', true); return; }
       openExport({
-        title: `掛け合い台本 ${stamp()}`, artist: scriptSpeakers().join(' × '), mono: true,
+        title: `${state.script.title || '掛け合い台本'} ${stamp()}`, artist: scriptSpeakers().join(' × '), mono: true,
         getBuffer: async () => {
           const bufs = [];
           for (let i = 0; i < bs.length; i++) {
             setExportStep(`ブロック ${i + 1}/${bs.length} の音声を用意しています…`, (i / bs.length) * 0.08);
-            bufs.push(await getBlockBuffer(bs[i]));
+            bufs.push(await getBlockBuffer(bs[i], cast));
           }
           return joinBuffers(bufs, 1.2);
         }
       });
     });
     $('#btnUseScript').addEventListener('click', () => {
-      if (!state.script.blocks.length) { toast('先に台本を読み込んでください', true); return; }
+      if (!betweenSeq().length) { toast('流せる台本がありません。台本を保存するか、放送順に追加してください', true); return; }
       if (state.between.mode !== 'mix') state.between.mode = 'script';
       $('#betweenMode').value = state.between.mode;
       state.segPrefetch = null;
@@ -2480,18 +2861,20 @@
       toast('曲間で台本の掛け合いを流します');
     });
 
-    // AIで下書き
+    // AIで下書き（新しい台本セットとして保存）
     $('#btnDraft').addEventListener('click', () => openModal('modalDraft'));
     $('#draftForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = e.target;
-      if (ta.value.trim() && !confirm('今の台本を、AIの下書きで置き換えます。よろしいですか？')) return;
+      if (state.scripts.length >= state.scriptsMax) { toast(`台本は ${state.scriptsMax} セットまでです`, true); return; }
       await withBusy(f.querySelector('button[type=submit]'), '書いています…', async () => {
         try {
           const d = await api('script_draft', { cast: [f.a.value, f.b.value], theme: f.theme.value, blocks: Number(f.blocks.value) });
-          ta.value = d.text;
-          state.script.cast = {};
-          applyScript(d.text);
+          const cast = {};
+          [f.a.value, f.b.value].forEach((id) => { const p = personaById(id); if (p.name) cast[p.name] = id; });
+          const title = (f.theme.value.trim() || 'AIの下書き').slice(0, 40);
+          const sc = await createScript(title, d.text, cast);
+          if (sc) await saveCurrentScript();
           closeModal('modalDraft');
         } catch (err) { toast(err.message, true); }
       });

@@ -1,5 +1,5 @@
 /* =========================================================
-   NEON WAVE RADIO - style.css  v1.1.0
+   NEON WAVE RADIO - style.css  v1.2.0
    ========================================================= */
 :root {
   --ink: #0d0a1f;          /* 夜空 */
@@ -689,6 +689,53 @@ input[type="range"] { accent-color: var(--magenta); }
   .nav-btn { white-space: nowrap; font-size: .74rem; }
   .studio-tabs .seg-btn { font-size: .76rem; white-space: nowrap; padding-left: .2em; padding-right: .2em; }
 }
+
+/* =========================================================
+   v1.2.0 追加：ライブラリ / 台本セット / 放送順
+   ========================================================= */
+.lib-row { display: flex; align-items: center; gap: 4px; margin-bottom: 12px; }
+.lib-row select {
+  flex: 1; min-width: 0; padding: .55em .8em; border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, .35); border: 1px solid var(--line); font-weight: 700;
+}
+.lib-row select:focus { border-color: var(--cyan); outline: none; }
+.lib-row select option { background: var(--ink-2); }
+.lib-row .icon-btn:disabled { opacity: .3; cursor: default; }
+.lib-count { flex: none; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
+
+.lp-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.lp-item {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; cursor: pointer;
+  padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, .25); box-shadow: 0 0 0 1px var(--line) inset;
+}
+.lp-item input { width: 18px; height: 18px; accent-color: var(--magenta); }
+.lp-item:has(input:checked) { box-shadow: 0 0 0 1.5px var(--magenta) inset; }
+.lp-name { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-count { font-size: .78rem; color: var(--muted); }
+
+.rundown-head { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.rundown { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; max-height: 42vh; overflow-y: auto; }
+.rd {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  padding: 8px 10px; border-radius: 12px; background: rgba(0, 0, 0, .22); box-shadow: 0 0 0 1px var(--line) inset;
+}
+.rd.is-next { box-shadow: 0 0 0 1.5px var(--magenta) inset; }
+.rd.is-done { opacity: .5; }
+.rd-no {
+  width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center;
+  font-family: var(--f-lcd); font-size: .85rem; background: #1f1406; color: var(--tube);
+  box-shadow: 0 0 0 1px #3d2a10 inset;
+}
+.rd.is-next .rd-no { background: var(--magenta); color: #1a0613; box-shadow: none; }
+.rd-main { min-width: 0; display: flex; flex-direction: column; }
+.rd-main b { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rd-main span { font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rd-actions { display: flex; }
+.rd-actions .icon-btn { padding: .3em .4em; }
+.rd-actions .icon-btn:disabled { opacity: .25; cursor: default; }
+.rd-empty { padding: 14px 8px; }
+#btnAddScriptToRundown { margin-bottom: 4px; }
+.pm-note { margin-top: -6px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
