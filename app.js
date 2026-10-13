@@ -3101,21 +3101,43 @@
     return { items, bad };
   }
 
-  /** 曲と掛け合い（放送順）を交互に並べる */
+  /** 交互に並べるときに使う掛け合いブロックの一覧
+   *  1. 「放送順」に入っているブロックを先に使う
+   *  2. 足りない分は、保存済みの全台本（掛1-1, 掛1-2 … 掛2-1 …）から、まだ使っていないものを順に補う */
+  function autoTalkPool(need) {
+    const out = [], used = new Set();
+    const add = (sid, bi) => {
+      const key = sid + ':' + bi;
+      if (used.has(key)) return;
+      used.add(key);
+      out.push({ sid, bi });
+    };
+    (state.rundown || []).forEach((it) => {
+      const sc = scriptById(it.sid);
+      if (!sc) return;
+      const bs = blocksOf(sc);
+      if (it.b < 0) bs.forEach((_, bi) => add(sc.id, bi));
+      else if (bs[it.b]) add(sc.id, it.b);
+    });
+    if (out.length < need) {
+      state.scripts.forEach((sc) => blocksOf(sc).forEach((_, bi) => add(sc.id, bi)));
+    }
+    return out;
+  }
+
+  /** 曲と掛け合いを交互に並べる（掛 → 曲 → 掛 → 曲 … → 掛） */
   function autoProgram() {
-    const songs = librarySongs();
-    const talks = betweenSeq();
-    if (!songs.length) { toast('曲がありません', true); return; }
-    const every = state.between.every || 1;
+    const songs = librarySongs().slice(0, 149);   // 掛＋曲で300件以内に収める
+    const talks = autoTalkPool(songs.length + 1);
     const out = [];
     let k = 0;
-    if (talks[k]) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
-    songs.forEach((t, i) => {
+    const pushTalk = () => { if (k < talks.length) { out.push({ t: 'k', sid: talks[k].sid, b: talks[k].bi }); k++; } };
+    pushTalk();                                   // オープニング
+    songs.forEach((t) => {
       out.push({ t: 's', id: t.id });
-      if ((i + 1) % every === 0 && talks[k] && i < songs.length - 1) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
+      pushTalk();                                 // 曲のあとに1ブロック（最後はエンディング）
     });
-    if (talks[k]) out.push({ t: 'k', sid: talks[k].sid, b: talks[k++].bi });
-    return out;
+    return { items: out, songs: songs.length, talks: k };
   }
 
   /* ---------- 番組表で放送 ---------- */
@@ -3219,12 +3241,19 @@
       toast(bad.length ? `追加しました（見つからない番号：${bad.join('、')}）` : `${items.length} 件を後ろに追加しました`, !!bad.length);
     });
     $('#btnProgAuto').addEventListener('click', () => {
+      if (!librarySongs().length) { toast('今のライブラリに曲がありません', true); return; }
+      if (!state.scripts.some((sc) => blocksOf(sc).length)) { toast('掛け合いの台本がありません。先に台本を保存してください', true); return; }
       if (state.program.length && !confirm('今の番組表を、曲と掛け合いを交互に並べた内容で置き換えますか？')) return;
-      const items = autoProgram();
-      if (!items) return;
-      state.program = items.slice(0, 300);
+      const r = autoProgram();
+      if (!r.items.length) { toast('並べられる曲・掛け合いがありません', true); return; }
+      stopProgram();
+      state.program = r.items;
       programChanged();
-      toast('曲と掛け合いを交互に並べました');
+      const ol = $('#progList');
+      if (ol) ol.scrollTop = 0;
+      toast(r.talks < r.songs + 1
+        ? `${r.songs}曲・${r.talks}トークで並べました（掛け合いが足りない所は曲が続きます）`
+        : `${r.songs}曲・${r.talks}トークを交互に並べました`, r.talks < r.songs + 1);
     });
     $('#btnProgClear').addEventListener('click', () => {
       if (!state.program.length || !confirm('番組表をクリアしますか？')) return;
