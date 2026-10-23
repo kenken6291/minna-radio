@@ -1,4 +1,4 @@
-# NEON WAVE RADIO（minna-radio）v1.3.1
+# NEON WAVE RADIO（minna-radio）v1.4.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
@@ -53,8 +53,10 @@ minna-radio/
 | Libraries | id, ownerId, name, trackIds(JSON), createdAt, updatedAt |
 | Scripts | id, ownerId, title, text, cast(JSON), createdAt, updatedAt |
 | Programs | ownerId, items(JSON), updatedAt |
+| ShowOrders | showName, trackIds(JSON), updatedBy, updatedAt |
+| ListenOrders | ownerId, showName, mode(order/reverse/shuffle/custom), trackIds(JSON), updatedAt |
 
-※ Personas / Libraries / Scripts / Programs シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ Personas / Libraries / Scripts / Programs / ShowOrders / ListenOrders シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
 
 日時はすべてミリ秒の数値（テキスト書式）で保存しています。
 
@@ -85,6 +87,15 @@ minna-radio/
 - スマホで画面を消すと YouTube は止まります（YouTube側の仕様）。Drive／外部URLの曲はロック画面の操作に対応。
 - iPhone では音量スライダーが外部URL・YouTube に効かない場合があります（端末の音量ボタンで調整）。
 - **AIパーソナリティ**は「スタジオ → パーソナリティ」で作成・編集・複製・削除できます（声30種類から選択、話し方・キャラクター設定も自由）。標準の5人は `Code.gs` の `BUILTIN_PERSONAS` にあり、画面からは編集できません（複製して使う）。
+
+## v1.4.0 の変更点
+
+- **使い方ガイド**：右上の「❓ 使い方」（ポッドキャスト画面にも「❓ 使い方」）で、はじめに／ラジオ／ポッドキャスト／ライブルーム／スタジオ／困ったとき を表示。初回ログイン時は自動で1回開きます。
+- **エピソードの並べ替え**（全員共通）：番組の「↕ 並べ替え」で ⤒ ↑ ↓ ⤓、「EP番号」を押して番号指定、「🔤 タイトル順にそろえる」で第01章…の番号順に一括整列。並べ替えできるのはその番組にエピソードを登録した人と管理者。サーバー（ShowOrders）に保存。
+- **聞く順の設定**（1人ずつ）：番組ごとに「並び順どおり／逆順／シャッフル／自分で決めた順」。自分で決めた順は「✎ 聞く順を決める」でチェックした話だけを好きな順に。サーバー（ListenOrders）に保存するのでスマホと PC で共通。
+- 「▶ 聞く順に再生」で番組を最後まで連続再生。エピソードの再生ボタンからは、その話から聞く順に続けて再生。ポッドキャスト連続再生中は DJ トークとシャッフルを挟みません。
+- 不具合修正：一覧の「＋（次に再生）」ボタンが反応しなかった問題。
+- Code.gs を更新しています。**GAS を新バージョンで再デプロイ**してください（シートは自動作成されるので setup の再実行は不要）。
 
 ## v1.3.1 の変更点
 

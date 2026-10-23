@@ -1,10 +1,11 @@
 /**
- * NEON WAVE RADIO - app.js  v1.3.1
+ * NEON WAVE RADIO - app.js  v1.4.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
  * v1.3.0：番組表（曲No・掛け合いNoの順番で放送）/ 台本一覧
  * v1.3.1：ライブラリ内の曲の並べ替え（一番上・1つ上・1つ下・一番下・番号を指定）
+ * v1.4.0：使い方ガイド / ポッドキャストのエピソード並べ替え（全員共通）/ 聞く順の設定（自分用）
  */
 'use strict';
 (() => {
@@ -74,6 +75,10 @@
     tracks: [],
     songFilter: 'all',
     reorder: false,
+    showOrders: {},          // 番組ごとのエピソード並び順（全員共通）
+    listenOrders: {},        // 番組ごとの聞く順（自分用）
+    podSort: null,           // 並べ替え中の番組キー
+    podQueue: false,         // ポッドキャストを聞く順で再生中（DJトーク・シャッフルを挟まない）
     queue: [],
     idx: -1,
     playing: false,
@@ -356,6 +361,39 @@
     loadScripts().then(loadProgram);
     const hash = location.hash.replace('#', '');
     showView(VIEWS.includes(hash) ? hash : 'radio');
+    try {
+      if (!localStorage.getItem(HELP_SEEN_KEY)) {
+        localStorage.setItem(HELP_SEEN_KEY, '1');
+        setTimeout(() => openHelp('start'), 600);
+      }
+    } catch (e) { /* noop */ }
+  }
+
+  /* =========================================================
+   *  使い方
+   * ========================================================= */
+  const HELP_SEEN_KEY = 'nwr_help_seen';
+  function openHelp(tab) {
+    showHelpTab(tab || ({ radio: 'radio', podcast: 'podcast', rooms: 'rooms', studio: 'studio' }[state.view]) || 'start');
+    openModal('modalHelp');
+  }
+  function showHelpTab(tab) {
+    $$('[data-help-tab]').forEach((b) => {
+      const on = b.dataset.helpTab === tab;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    $$('[data-help-panel]').forEach((p) => (p.hidden = p.dataset.helpPanel !== tab));
+    const body = $('#helpBody');
+    if (body) body.scrollTop = 0;
+  }
+  function bindHelp() {
+    $('#btnHelp').addEventListener('click', () => openHelp());
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-help]');
+      if (b) openHelp(b.dataset.help);
+    });
+    $$('[data-help-tab]').forEach((b) => b.addEventListener('click', () => showHelpTab(b.dataset.helpTab)));
   }
 
   /* =========================================================
@@ -692,7 +730,7 @@
   function computeNext() {
     const n = state.queue.length;
     if (!n) return null;
-    if (state.shuffle && n > 1) {
+    if (state.shuffle && !state.podQueue && n > 1) {
       let r;
       do { r = Math.floor(Math.random() * n); } while (r === state.idx);
       return r;
@@ -749,10 +787,11 @@
     maybePrefetchSegment();
   }
 
-  function playList(list, start = 0) {
+  function playList(list, start = 0, opts = {}) {
     if (!list.length) return;
     unlockMedia();
     stopProgram();
+    state.podQueue = !!opts.podcast;
     state.queue = list.slice();
     state.playedCount = 0;
     state.segPrefetch = null;
@@ -812,7 +851,7 @@
       toast('プレイリストを最後まで再生しました');
       return;
     }
-    if (state.between.mode !== 'off' && state.playedCount % state.between.every === 0) {
+    if (!state.podQueue && state.between.mode !== 'off' && state.playedCount % state.between.every === 0) {
       const plan = pickBetween();
       if (plan) {
         const key = planKey(plan, state.idx, n);
@@ -1128,7 +1167,7 @@
   /** 次の曲が終わったときにトークが入る予定なら、音声を先に作っておく */
   function maybePrefetchSegment() {
     if (state.progMode) { prefetchProgram(); return; }
-    if (state.between.mode === 'off' || state.plannedNext == null || state.loop === 'one') return;
+    if (state.podQueue || state.between.mode === 'off' || state.plannedNext == null || state.loop === 'one') return;
     if ((state.playedCount + 1) % state.between.every !== 0) return;
     const plan = pickBetween();
     if (!plan) return;
@@ -1193,6 +1232,7 @@
     const lib = libById(state.libId);
     if (lib) toast(`ライブラリ「${lib.name}」を放送します`);
     const start = state.shuffle ? Math.floor(Math.random() * songs.length) : 0;
+    state.podQueue = false;
     state.queue = songs;
     state.playedCount = 0;
     state.segPrefetch = null;
@@ -1285,6 +1325,8 @@
     try {
       const d = await api('tracks_list');
       state.tracks = d.tracks || [];
+      state.showOrders = d.showOrders || {};
+      state.listenOrders = d.listenOrders || {};
     } catch (e) {
       toast(e.message, true);
     }
@@ -1294,8 +1336,16 @@
 
   const canDelete = (t) => state.user && (t.ownerId === state.user.userId || state.user.role === 'admin');
 
-  function trackItemHtml(t, listName, i, no) {
-    const sorting = listName === 'songs' && state.reorder && !!state.libId && !!no;
+  /**
+   * opt.sorting : 並べ替えボタンを出す
+   * opt.total   : 並べ替え対象の件数（↓⤓ の無効判定）
+   * opt.prefix  : 番号の頭（曲 / EP）
+   */
+  function trackItemHtml(t, listName, i, no, opt = {}) {
+    const isSong = listName === 'songs';
+    const sorting = opt.sorting != null ? !!(opt.sorting && no) : (isSong && state.reorder && !!state.libId && !!no);
+    const total = opt.total || lists.songs.length;
+    const label = (opt.prefix || '曲') + no;
     const sub = t.kind === 'podcast'
       ? `${esc(t.ownerName || '')} さんが登録`
       : `${esc(trackSubtitle(t))}（${esc(t.ownerName || '')} さんが登録）`;
@@ -1304,18 +1354,18 @@
         <button class="track-cover" style="background:${coverBg(t.title)}" data-play="${listName}" data-i="${i}" aria-label="「${esc(t.title)}」を再生"><span class="play-ico">▶</span></button>
         <div class="track-main">
           <div class="track-title">${no ? (sorting
-            ? `<button class="track-no track-no-btn" data-mvto="${esc(t.id)}" title="番号を指定して移動">曲${no}</button>`
-            : `<span class="track-no">曲${no}</span>`) : ''}${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
+            ? `<button class="track-no track-no-btn" data-mvto="${esc(t.id)}" title="番号を指定して移動">${label}</button>`
+            : `<span class="track-no">${label}</span>`) : ''}${t.source === 'youtube' ? '📺 ' : ''}${esc(t.title)}</div>
           <div class="track-meta">${sub}</div>
           ${t.kind === 'podcast' && t.description ? `<p class="ep-desc">${esc(t.description)}</p>` : ''}
         </div>
         ${sorting ? `<div class="track-actions track-order">
           <button class="icon-btn" data-mv="top" data-id="${esc(t.id)}" title="一番上へ" aria-label="一番上へ"${no === 1 ? ' disabled' : ''}>⤒</button>
           <button class="icon-btn" data-mv="up" data-id="${esc(t.id)}" title="1つ上へ" aria-label="1つ上へ"${no === 1 ? ' disabled' : ''}>↑</button>
-          <button class="icon-btn" data-mv="down" data-id="${esc(t.id)}" title="1つ下へ" aria-label="1つ下へ"${no === lists.songs.length ? ' disabled' : ''}>↓</button>
-          <button class="icon-btn" data-mv="bottom" data-id="${esc(t.id)}" title="一番下へ" aria-label="一番下へ"${no === lists.songs.length ? ' disabled' : ''}>⤓</button>
+          <button class="icon-btn" data-mv="down" data-id="${esc(t.id)}" title="1つ下へ" aria-label="1つ下へ"${no === total ? ' disabled' : ''}>↓</button>
+          <button class="icon-btn" data-mv="bottom" data-id="${esc(t.id)}" title="一番下へ" aria-label="一番下へ"${no === total ? ' disabled' : ''}>⤓</button>
         </div>` : `<div class="track-actions">
-          <button class="icon-btn" data-next=""${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
+          <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
           ${t.kind === 'song' ? `<button class="icon-btn" data-libpick="${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
           ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
@@ -1324,7 +1374,7 @@
       </li>`;
   }
 
-  const lists = { songs: [], shows: {} };
+  const lists = { songs: [], shows: {}, showKeys: [] };
 
   /* ---------- 楽曲ライブラリ（セット） ---------- */
   const libById = (id) => state.libraries.find((l) => l.id === id);
@@ -1532,29 +1582,318 @@
     renderProgram();
   }
 
+  /* =========================================================
+   *  ポッドキャスト：エピソードの並び順（全員共通）と聞く順（自分用）
+   * ========================================================= */
+  const LISTEN_MODES = [
+    { v: 'order', label: '並び順どおり（上から）' },
+    { v: 'reverse', label: '逆順（下から）' },
+    { v: 'shuffle', label: 'シャッフル' },
+    { v: 'custom', label: '自分で決めた順' }
+  ];
+  const showKeyOf = (t) => String(t.showName || '');
+  const showLabel = (k) => k || '番組名なし';
+
+  /** 番組のエピソードを「並び順」で返す（並び順に無いものは登録の古い順で後ろに） */
+  function showEpisodes(key) {
+    const eps = state.tracks.filter((t) => t.kind === 'podcast' && showKeyOf(t) === key)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const pos = new Map((state.showOrders[key] || []).map((id, i) => [id, i]));
+    const p = (t) => (pos.has(t.id) ? pos.get(t.id) : 1e9);
+    return eps.sort((a, b) => (p(a) - p(b)) || (a.createdAt - b.createdAt));
+  }
+
+  function canSortShow(key) {
+    if (!state.user) return false;
+    if (state.user.role === 'admin') return true;
+    return state.tracks.some((t) => t.kind === 'podcast' && showKeyOf(t) === key && t.ownerId === state.user.userId);
+  }
+
+  function listenPref(key) {
+    const p = state.listenOrders[key];
+    return p && LISTEN_MODES.some((m) => m.v === p.mode) ? p : { mode: 'order', trackIds: [] };
+  }
+
+  function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+
+  /** 聞く順に並べたエピソード */
+  function listenQueue(key) {
+    const eps = showEpisodes(key);
+    const pref = listenPref(key);
+    if (pref.mode === 'reverse') return eps.slice().reverse();
+    if (pref.mode === 'shuffle') return shuffled(eps);
+    if (pref.mode === 'custom') {
+      const map = new Map(eps.map((t) => [t.id, t]));
+      const q = pref.trackIds.map((id) => map.get(id)).filter(Boolean);
+      return q.length ? q : eps;
+    }
+    return eps;
+  }
+
+  /** 番組を聞く順で再生。startId を指定するとその話から */
+  function playShow(key, startId) {
+    let q = listenQueue(key);
+    if (!q.length) { toast('この番組にはまだエピソードがありません'); return; }
+    let start = 0;
+    if (startId) {
+      start = q.findIndex((t) => t.id === startId);
+      if (start < 0) {
+        const t = state.tracks.find((x) => x.id === startId);
+        if (!t) return;
+        toast('この話は「聞く順」に入っていないので、この話だけ再生します');
+        playList([t], 0, { podcast: true });
+        return;
+      }
+      if (listenPref(key).mode === 'shuffle') { q = [q[start]].concat(q.filter((_, i) => i !== start)); start = 0; }
+    } else {
+      toast(`「${showLabel(key)}」を聞く順に再生します（全${q.length}話）`);
+    }
+    playList(q, start, { podcast: true });
+  }
+
+  function listenSummary(key) {
+    const eps = showEpisodes(key);
+    const no = new Map(eps.map((t, i) => [t.id, i + 1]));
+    const pref = listenPref(key);
+    if (pref.mode === 'shuffle') return '毎回ちがう順番で再生します';
+    const q = listenQueue(key);
+    const parts = q.map((t) => 'EP' + no.get(t.id));
+    const skipped = eps.length - q.length;
+    return parts.join(' → ') + (skipped > 0 ? `（${skipped}話はスキップ）` : '');
+  }
+
   function renderPodcasts() {
-    const eps = state.tracks.filter((t) => t.kind === 'podcast');
-    const shows = {};
-    eps.forEach((t) => { const k = t.showName || '番組名なし'; (shows[k] = shows[k] || []).push(t); });
-    lists.shows = shows;
-    const names = Object.keys(shows);
-    $('#podcastShows').innerHTML = names.length
-      ? names.map((name, si) => `
-        <article class="show">
+    const keys = [];
+    state.tracks.forEach((t) => { if (t.kind === 'podcast' && !keys.includes(showKeyOf(t))) keys.push(showKeyOf(t)); });
+    if (state.podSort != null && !keys.includes(state.podSort)) state.podSort = null;
+    lists.showKeys = keys;
+    lists.shows = {};
+    $('#podcastShows').innerHTML = keys.length
+      ? keys.map((key, si) => {
+        const eps = showEpisodes(key);
+        lists.shows[key] = eps;
+        const sorting = state.podSort === key;
+        const pref = listenPref(key);
+        const sortable = canSortShow(key);
+        return `
+        <article class="show${sorting ? ' is-sorting' : ''}" data-show="${si}">
           <div class="show-head">
-            <div class="show-art" style="background:hsl(${hue(name)} 85% 62%)">${esc(initial(name))}</div>
-            <div><h3 class="show-name">${esc(name)}</h3><span class="show-count">${shows[name].length} エピソード</span></div>
+            <div class="show-art" style="background:hsl(${hue(showLabel(key))} 85% 62%)">${esc(initial(showLabel(key)))}</div>
+            <div class="show-info"><h3 class="show-name">${esc(showLabel(key))}</h3><span class="show-count">${eps.length} エピソード</span></div>
           </div>
-          <ul class="track-list">${shows[name].map((t, i) => trackItemHtml(t, 'show:' + si, i)).join('')}</ul>
-        </article>`).join('')
+          <div class="show-tools">
+            <button class="btn btn-primary btn-small" data-pod-play="${si}">▶ 聞く順に再生</button>
+            <label class="pod-mode"><span>聞く順</span>
+              <select data-pod-mode="${si}" aria-label="聞く順">
+                ${LISTEN_MODES.map((m) => `<option value="${m.v}"${m.v === pref.mode ? ' selected' : ''}>${m.label}</option>`).join('')}
+              </select></label>
+            ${pref.mode === 'custom' ? `<button class="btn btn-ghost btn-small" data-pod-edit="${si}">✎ 聞く順を決める</button>` : ''}
+            ${sortable ? `<button class="btn btn-ghost btn-small${sorting ? ' is-active' : ''}" data-pod-sort="${si}">${sorting ? '✓ 並べ替え完了' : '↕ 並べ替え'}</button>` : ''}
+          </div>
+          <p class="pod-listen"><span class="pod-listen-label">聞く順</span>${esc(listenSummary(key))}</p>
+          ${sorting ? `<div class="pod-sort-hint">
+            <p>⤒ 一番上 ／ ↑ 1つ上 ／ ↓ 1つ下 ／ ⤓ 一番下。「EP番号」を押すと番号を指定して移動できます。並び順は自動で保存され、みんなの画面にも反映されます。</p>
+            <button class="btn btn-ghost btn-small" data-pod-autosort="${si}">🔤 タイトル順にそろえる</button>
+          </div>` : ''}
+          <ul class="track-list">${eps.map((t, i) => trackItemHtml(t, 'show:' + si, i, i + 1, { sorting, total: eps.length, prefix: 'EP' })).join('')}</ul>
+        </article>`;
+      }).join('')
       : '<p class="empty">ポッドキャストはまだありません。「＋ エピソードを登録」から追加できます</p>';
     markCurrentInLists();
   }
 
+  const showKeyByIndex = (si) => lists.showKeys[Number(si)];
+
+  /* ---------- 並べ替え（全員共通の並び順） ---------- */
+  const showSaveTimers = new Map();
+  function scheduleShowSave(key) {
+    clearTimeout(showSaveTimers.get(key));
+    showSaveTimers.set(key, setTimeout(async () => {
+      showSaveTimers.delete(key);
+      try {
+        const d = await api('show_order_save', { showName: key, trackIds: state.showOrders[key] || [] });
+        state.showOrders[key] = d.trackIds || state.showOrders[key];
+      } catch (e) { toast('並び順を保存できませんでした：' + e.message, true); loadTracks(); }
+    }, 700));
+  }
+
+  /** how: top / up / down / bottom / 数値（移動先のEP番号） */
+  function moveEpisode(key, id, how) {
+    const ids = showEpisodes(key).map((t) => t.id);
+    const from = ids.indexOf(id);
+    if (from < 0) return;
+    let to = from;
+    if (how === 'top') to = 0;
+    else if (how === 'up') to = from - 1;
+    else if (how === 'down') to = from + 1;
+    else if (how === 'bottom') to = ids.length - 1;
+    else if (typeof how === 'number') to = how - 1;
+    to = Math.max(0, Math.min(ids.length - 1, to));
+    if (to === from) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, id);
+    state.showOrders[key] = ids;
+    renderPodcasts();
+    const li = $(`#podcastShows [data-track-id="${CSS.escape(id)}"]`);
+    if (li) {
+      li.classList.remove('is-moved');
+      void li.offsetWidth;
+      li.classList.add('is-moved');
+      li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    scheduleShowSave(key);
+  }
+
+  function autoSortShow(key) {
+    const eps = showEpisodes(key).slice()
+      .sort((a, b) => a.title.normalize('NFKC').localeCompare(b.title.normalize('NFKC'), 'ja', { numeric: true }));
+    state.showOrders[key] = eps.map((t) => t.id);
+    renderPodcasts();
+    scheduleShowSave(key);
+    toast('タイトル順にそろえました');
+  }
+
+  /* ---------- 聞く順（自分用） ---------- */
+  async function saveListen(key, mode, trackIds) {
+    const before = state.listenOrders[key];
+    state.listenOrders[key] = { mode, trackIds };
+    renderPodcasts();
+    try {
+      const d = await api('listen_order_save', { showName: key, mode, trackIds });
+      state.listenOrders[key] = { mode: d.mode, trackIds: d.trackIds || [] };
+      renderPodcasts();
+      return true;
+    } catch (e) {
+      if (before) state.listenOrders[key] = before; else delete state.listenOrders[key];
+      renderPodcasts();
+      toast('聞く順を保存できませんでした：' + e.message, true);
+      return false;
+    }
+  }
+
+  const loDraft = { key: '', items: [] };   // items: [{ id, on }]
+
+  function openListenEditor(key) {
+    const eps = showEpisodes(key);
+    const pref = listenPref(key);
+    const map = new Map(eps.map((t) => [t.id, t]));
+    const picked = pref.trackIds.filter((id) => map.has(id));
+    loDraft.key = key;
+    loDraft.items = picked.length
+      ? picked.map((id) => ({ id, on: true })).concat(eps.filter((t) => !picked.includes(t.id)).map((t) => ({ id: t.id, on: false })))
+      : eps.map((t) => ({ id: t.id, on: true }));
+    $('#loShow').textContent = showLabel(key);
+    renderListenEditor();
+    openModal('modalListen');
+  }
+
+  function renderListenEditor() {
+    const eps = showEpisodes(loDraft.key);
+    const map = new Map(eps.map((t, i) => [t.id, { t, no: i + 1 }]));
+    loDraft.items = loDraft.items.filter((it) => map.has(it.id));
+    let n = 0;
+    const last = loDraft.items.length - 1;
+    $('#loList').innerHTML = loDraft.items.map((it, i) => {
+      const { t, no } = map.get(it.id);
+      return `
+        <li class="lo-item${it.on ? '' : ' is-off'}">
+          <label class="lo-check"><input type="checkbox" data-lo-on="${i}"${it.on ? ' checked' : ''}>
+            <span class="lo-no">${it.on ? ++n : '−'}</span></label>
+          <span class="lo-title"><span class="track-no">EP${no}</span>${esc(t.title)}</span>
+          <span class="lo-move">
+            <button type="button" class="icon-btn" data-lo-mv="up" data-i="${i}" aria-label="1つ上へ"${i === 0 ? ' disabled' : ''}>↑</button>
+            <button type="button" class="icon-btn" data-lo-mv="down" data-i="${i}" aria-label="1つ下へ"${i === last ? ' disabled' : ''}>↓</button>
+          </span>
+        </li>`;
+    }).join('');
+    $('#loCount').textContent = `${n} / ${loDraft.items.length} 話を聞く`;
+  }
+
+  function bindPodcast() {
+    const root = $('#podcastShows');
+    root.addEventListener('click', (e) => {
+      const showEl = e.target.closest('[data-show]');
+      const key = showEl && showKeyByIndex(showEl.dataset.show);
+      if (key == null) return;
+      if (e.target.closest('[data-pod-play]')) { playShow(key); return; }
+      if (e.target.closest('[data-pod-edit]')) { openListenEditor(key); return; }
+      if (e.target.closest('[data-pod-sort]')) {
+        state.podSort = state.podSort === key ? null : key;
+        renderPodcasts();
+        return;
+      }
+      if (e.target.closest('[data-pod-autosort]')) { autoSortShow(key); return; }
+      const mv = e.target.closest('[data-mv]');
+      if (mv && !mv.disabled) { moveEpisode(key, mv.dataset.id, mv.dataset.mv); return; }
+      const to = e.target.closest('[data-mvto]');
+      if (to) {
+        const n = showEpisodes(key).length;
+        const v = Number(String(prompt(`何番目に移動しますか？（1〜${n}）`) || '').normalize('NFKC').trim());
+        if (Number.isInteger(v) && v >= 1) moveEpisode(key, to.dataset.mvto, Math.min(v, n));
+      }
+    });
+    root.addEventListener('change', (e) => {
+      const sel = e.target.closest('[data-pod-mode]');
+      if (!sel) return;
+      const key = showKeyByIndex(sel.dataset.podMode);
+      if (key == null) return;
+      const mode = sel.value;
+      if (mode === 'custom') {
+        const pref = listenPref(key);
+        if (pref.trackIds.length) saveListen(key, 'custom', pref.trackIds);
+        else openListenEditor(key);   // 初めては順番を決めてから保存
+        if (!pref.trackIds.length) sel.value = pref.mode;
+        return;
+      }
+      saveListen(key, mode, listenPref(key).trackIds);
+    });
+
+    $('#loList').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-lo-mv]');
+      if (!b || b.disabled) return;
+      const i = Number(b.dataset.i);
+      const j = b.dataset.loMv === 'up' ? i - 1 : i + 1;
+      if (j < 0 || j >= loDraft.items.length) return;
+      [loDraft.items[i], loDraft.items[j]] = [loDraft.items[j], loDraft.items[i]];
+      renderListenEditor();
+    });
+    $('#loList').addEventListener('change', (e) => {
+      const cb = e.target.closest('[data-lo-on]');
+      if (!cb) return;
+      loDraft.items[Number(cb.dataset.loOn)].on = cb.checked;
+      renderListenEditor();
+    });
+    $('#loTools').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-lo]');
+      if (!b) return;
+      const eps = showEpisodes(loDraft.key);
+      const on = new Map(loDraft.items.map((it) => [it.id, it.on]));
+      const keep = (t) => ({ id: t.id, on: on.has(t.id) ? on.get(t.id) : true });
+      if (b.dataset.lo === 'order') loDraft.items = eps.map(keep);
+      if (b.dataset.lo === 'reverse') loDraft.items = eps.slice().reverse().map(keep);
+      if (b.dataset.lo === 'all') loDraft.items.forEach((it) => (it.on = true));
+      if (b.dataset.lo === 'none') loDraft.items.forEach((it) => (it.on = false));
+      renderListenEditor();
+    });
+    $('#btnLoSave').addEventListener('click', async (e) => {
+      const ids = loDraft.items.filter((it) => it.on).map((it) => it.id);
+      if (!ids.length) { toast('聞くエピソードを1つ以上チェックしてください', true); return; }
+      await withBusy(e.currentTarget, '保存中…', async () => {
+        if (await saveListen(loDraft.key, 'custom', ids)) {
+          closeModal('modalListen');
+          toast('聞く順を保存しました');
+        }
+      });
+    });
+  }
+
   function listByName(name) {
     if (name === 'songs') return lists.songs;
-    const si = Number(name.split(':')[1]);
-    return lists.shows[Object.keys(lists.shows)[si]] || [];
+    return lists.shows[showKeyByIndex(name.split(':')[1])] || [];
   }
 
   function markCurrentInLists() {
@@ -1587,7 +1926,16 @@
   function bindLibrary() {
     document.addEventListener('click', (e) => {
       const play = e.target.closest('[data-play]');
-      if (play) { playList(listByName(play.dataset.play), Number(play.dataset.i)); return; }
+      if (play) {
+        const ln = play.dataset.play;
+        if (ln.startsWith('show:')) {
+          const li = play.closest('[data-track-id]');
+          const key = showKeyByIndex(ln.split(':')[1]);
+          if (key != null && li) { playShow(key, li.dataset.trackId); return; }
+        }
+        playList(listByName(ln), Number(play.dataset.i));
+        return;
+      }
       const nx = e.target.closest('[data-next]');
       if (nx) { unlockMedia(); addNext(nx.dataset.next); return; }
       const del = e.target.closest('[data-del]');
@@ -3145,6 +3493,7 @@
     unlockMedia();
     if (!state.program.length) { toast('番組表が空です', true); return; }
     if (state.djBusy) { toast('トークの最中です。終わってからもう一度どうぞ'); return; }
+    state.podQueue = false;
     state.queue = [];
     state.progSongIdx = [];
     state.program.forEach((it, i) => {
@@ -3723,6 +4072,8 @@
     bindPlayer();
     bindDj();
     bindLibrary();
+    bindPodcast();
+    bindHelp();
     bindRooms();
     bindStudio();
     bindExport();

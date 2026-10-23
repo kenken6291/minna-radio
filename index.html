@@ -69,6 +69,7 @@
       <button class="nav-btn" data-nav="rooms"><span aria-hidden="true">🎙</span>ライブルーム</button>
       <button class="nav-btn" data-nav="studio"><span aria-hidden="true">🎛</span>スタジオ</button>
     </nav>
+    <button class="help-btn" id="btnHelp" aria-label="使い方を見る"><span aria-hidden="true">❓</span><span class="help-btn-label">使い方</span></button>
     <button class="user-chip" id="userChip" aria-label="設定を開く">
       <span class="avatar" id="userAvatar"></span><span class="user-name" id="userName"></span>
     </button>
@@ -185,7 +186,10 @@
     <section id="view-podcast" class="view">
       <div class="view-head">
         <h2 class="view-title">ポッドキャスト</h2>
-        <button class="btn btn-primary" data-add-kind="podcast">＋ エピソードを登録</button>
+        <div class="view-head-actions">
+          <button class="btn btn-ghost btn-small" data-help="podcast">❓ 使い方</button>
+          <button class="btn btn-primary" data-add-kind="podcast">＋ エピソードを登録</button>
+        </div>
       </div>
       <div id="podcastShows" class="shows"></div>
     </section>
@@ -572,6 +576,184 @@
     <div class="modal-actions modal-actions-split">
       <button type="button" class="btn btn-ghost btn-small" id="btnLpNew">＋ 新しいライブラリを作って入れる</button>
       <button type="button" class="btn btn-primary" data-close>閉じる</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ===================== 聞く順を決める ===================== -->
+<div class="modal" id="modalListen" hidden>
+  <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="loTitle">
+    <h3 id="loTitle">聞く順を決める</h3>
+    <p class="ex-target" id="loShow"></p>
+    <p class="hint">チェックした話だけを、上から順番に再生します。↑↓ で順番を入れ替えてください。この順番はあなた専用です（ほかの人の画面は変わりません）。</p>
+    <div class="lo-tools" id="loTools">
+      <button type="button" class="chip" data-lo="order">並び順にもどす</button>
+      <button type="button" class="chip" data-lo="reverse">逆順にする</button>
+      <button type="button" class="chip" data-lo="all">全部チェック</button>
+      <button type="button" class="chip" data-lo="none">全部はずす</button>
+      <span class="lo-count" id="loCount"></span>
+    </div>
+    <ol class="lo-list" id="loList"></ol>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+      <button type="button" class="btn btn-primary" id="btnLoSave">この順番で保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 使い方 ===================== -->
+<div class="modal" id="modalHelp" hidden>
+  <div class="modal-card modal-card-help" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+    <h3 id="helpTitle">❓ 使い方</h3>
+    <div class="seg help-tabs" role="tablist" aria-label="使い方の項目">
+      <button type="button" class="seg-btn is-active" data-help-tab="start" role="tab">はじめに</button>
+      <button type="button" class="seg-btn" data-help-tab="radio" role="tab">📻 ラジオ</button>
+      <button type="button" class="seg-btn" data-help-tab="podcast" role="tab">🎧 ポッドキャスト</button>
+      <button type="button" class="seg-btn" data-help-tab="rooms" role="tab">🎙 ライブルーム</button>
+      <button type="button" class="seg-btn" data-help-tab="studio" role="tab">🎛 スタジオ</button>
+      <button type="button" class="seg-btn" data-help-tab="faq" role="tab">困ったとき</button>
+    </div>
+    <div class="help-body" id="helpBody">
+
+      <section data-help-panel="start">
+        <p class="help-lead">NEON WAVE は、みんなで曲やおしゃべりを持ち寄る「AIラジオ局」です。AI DJ が曲の合間にしゃべってくれます。</p>
+        <h4>画面の切り替え</h4>
+        <ul>
+          <li><b>📻 ラジオ</b>：曲を流して、曲の合間に AI DJ や台本の掛け合いが入ります。</li>
+          <li><b>🎧 ポッドキャスト</b>：番組ごとにエピソード（話）を登録して聞けます。聞く順番も決められます。</li>
+          <li><b>🎙 ライブルーム</b>：みんなで集まって、文字や録音した声でおしゃべりします。</li>
+          <li><b>🎛 スタジオ</b>：AIとの対話、掛け合い台本づくり、番組表、パーソナリティの設定ができます。</li>
+        </ul>
+        <h4>画面下のプレイヤー</h4>
+        <ul>
+          <li>▶ / ⏸ で再生と一時停止、⏮ ⏭ で前後の曲へ移ります。</li>
+          <li>🔀 でシャッフル、🔁 でリピート（オフ／全部／1曲）を切り替えます。</li>
+          <li>☰ を押すと、再生中の一覧（プレイリスト）で次に流れる曲を確かめられます。</li>
+          <li>各曲の <b>＋</b> は「次に再生」、<b>⬇</b> は音声ファイルに書き出し（MP3 / WAV など）、<b>🗑</b> は削除（登録した人と管理者だけ）です。</li>
+        </ul>
+        <h4>設定</h4>
+        <ul>
+          <li>右上の名前（アイコン）を押すと、ニックネームの変更・パスワード変更・ログアウトができます。</li>
+          <li>この使い方は、右上の <b>❓ 使い方</b> からいつでも開けます。</li>
+        </ul>
+      </section>
+
+      <section data-help-panel="radio" hidden>
+        <h4>まずは放送してみる</h4>
+        <ol>
+          <li>右側の「楽曲ライブラリ」の <b>＋ 曲を追加</b> から曲を登録します（Google Drive のファイル、外部URL、YouTube）。</li>
+          <li>「AIパーソナリティ」で、しゃべってくれる DJ を選びます。</li>
+          <li><b>▶ 放送をはじめる</b> を押すと、選んでいるライブラリの曲が順番に流れます。</li>
+        </ol>
+        <h4>曲の合間のおしゃべり</h4>
+        <ul>
+          <li>「曲間に入れる」で、AI DJ のトーク／台本の掛け合い／台本→AIトーク／なし を選びます。</li>
+          <li>「タイミング」で、毎曲・2曲ごと・3曲ごと・5曲ごとを選べます。</li>
+          <li><b>🎙 AI DJ にしゃべってもらう</b> を押すと、いつでもすぐにトークが入ります。</li>
+        </ul>
+        <h4>楽曲ライブラリ（20セットまで）</h4>
+        <ul>
+          <li>選択欄の横の <b>＋</b> で新しいライブラリを作り、各曲の <b>📁</b> で入れたり外したりします。</li>
+          <li>ライブラリを選んで <b>↕ 並べ替え</b> を押すと、⤒ ↑ ↓ ⤓ で曲順を変えられます。「曲No」を押すと番号を指定して移動。</li>
+          <li><b>📋 番組表で放送</b> を押すと、スタジオの番組表どおりに曲と掛け合いを流します。</li>
+        </ul>
+        <h4>ラジオエフェクト</h4>
+        <p>ローファイ（AMラジオ風）、エコー、リバーブで DJ の声の雰囲気を変えられます。ジングルも鳴らせます。</p>
+      </section>
+
+      <section data-help-panel="podcast" hidden>
+        <h4>エピソードを登録する</h4>
+        <ol>
+          <li>右上の <b>＋ エピソードを登録</b> を押します。</li>
+          <li>「番組名」を入れます。同じ番組名のエピソードは1つの番組にまとまります（例：小説朗読）。</li>
+          <li>タイトルと音声（Drive・外部URL・YouTube）を指定して登録します。</li>
+        </ol>
+        <h4>聞く</h4>
+        <ul>
+          <li><b>▶ 聞く順に再生</b> を押すと、その番組を「聞く順」で最後まで続けて再生します。</li>
+          <li>エピソードの丸いレコードを押すと、その話から「聞く順」に続けて再生します。</li>
+          <li>ポッドキャストを続けて聞くときは、DJトークやシャッフルは入りません。</li>
+        </ul>
+        <h4>エピソードの順番を変える（並べ替え）</h4>
+        <ul>
+          <li>番組の <b>↕ 並べ替え</b> を押すと、各話に ⤒（一番上）↑（1つ上）↓（1つ下）⤓（一番下）が出ます。</li>
+          <li>「EP番号」を押すと、何番目に移動するかを数字で指定できます。</li>
+          <li><b>🔤 タイトル順にそろえる</b> で「第01章・第02章…」のような番号順に一発で並びます。</li>
+          <li>並び順は自動で保存され、<b>みんなの画面に反映</b>されます。並べ替えできるのは、その番組にエピソードを登録した人と管理者です。</li>
+          <li>終わったら <b>✓ 並べ替え完了</b> を押します。</li>
+        </ul>
+        <h4>聞く順番を決める（自分用）</h4>
+        <ul>
+          <li>番組の「聞く順」で選びます。
+            <ul>
+              <li><b>並び順どおり（上から）</b>：EP1 → EP2 → … の順に再生</li>
+              <li><b>逆順（下から）</b>：いちばん下の話から上へ</li>
+              <li><b>シャッフル</b>：毎回ちがう順番</li>
+              <li><b>自分で決めた順</b>：好きな順番・好きな話だけ</li>
+            </ul>
+          </li>
+          <li>「自分で決めた順」を選ぶと <b>✎ 聞く順を決める</b> が出ます。チェックした話だけを、↑↓ で並べた順に再生します。</li>
+          <li>番組の下に「聞く順：EP1 → EP3 → …」と表示されるので、再生前に確かめられます。</li>
+          <li>聞く順はあなた専用です。ほかの人の聞く順や、番組の並び順は変わりません（スマホと PC で共通）。</li>
+        </ul>
+      </section>
+
+      <section data-help-panel="rooms" hidden>
+        <h4>ルームに入る・開く</h4>
+        <ul>
+          <li>一覧から参加したいルームを選んで入ります。<b>＋ ルームを開く</b> で自分のルームも作れます。</li>
+          <li>開いた人がホストになり、ステージ（話す人）とリスナー（聞く人）を切り替えられます。</li>
+        </ul>
+        <h4>話す</h4>
+        <ul>
+          <li>文字を入れて <b>送信</b>、または <b>🎙 録音して話す</b>（最大60秒）で声を届けます。</li>
+          <li>リスナーは <b>✋ 手を挙げる</b> で「話したい」と合図できます。</li>
+          <li><b>AI DJ を呼ぶ</b> と、AI パーソナリティが会話に加わります。</li>
+          <li>「新しい音声を自動再生」をオンにすると、届いた声が自動で流れます。</li>
+        </ul>
+        <p class="hint">同時通話ではなく、録音した声を順番に届ける方式です。</p>
+      </section>
+
+      <section data-help-panel="studio" hidden>
+        <h4>🎙 AIと対話</h4>
+        <ul>
+          <li>マイクを押して話しかけると、文字起こし → 選んだ声に変換 → AI パーソナリティが返事、の順で会話できます。</li>
+          <li>会話は書き出したり、<b>💾 ポッドキャストに保存</b> したりできます。</li>
+        </ul>
+        <h4>📝 掛け合い台本</h4>
+        <ul>
+          <li>「名前：セリフ」の形で1行ずつ書きます。「---」の行で区切ると、曲間1回分（1ブロック）になります。</li>
+          <li>話す人ごとに声（パーソナリティ）を割り当てます。<b>✨ AI で下書き</b> や .txt ファイルの取り込みもできます。</li>
+          <li>台本は 50 セットまで保存できます。</li>
+        </ul>
+        <h4>📚 台本一覧 ／ 📋 番組表</h4>
+        <ul>
+          <li>台本一覧で、全台本の番号・長さ・話し手を確認できます。</li>
+          <li>番組表では <code>掛1-1, 曲1, 曲2, 掛1-2</code> のように番号で放送順を組み立てます。</li>
+        </ul>
+        <h4>👥 パーソナリティ</h4>
+        <p>声（30種類）・話し方・キャラクターを決めて、自分だけの AI パーソナリティを作れます。標準の5人は複製して使います。</p>
+      </section>
+
+      <section data-help-panel="faq" hidden>
+        <dl class="help-faq">
+          <dt>音が出ない</dt>
+          <dd>スマホは画面を一度タップしてから ▶ を押してください。端末の音量やマナーモードも確認してください。</dd>
+          <dt>ポッドキャストの順番がバラバラ</dt>
+          <dd>番組の <b>↕ 並べ替え</b> → <b>🔤 タイトル順にそろえる</b> で番号順になります（登録した人・管理者）。自分だけ順番を変えたいときは「聞く順」を使います。</dd>
+          <dt>並べ替えボタンが出ない</dt>
+          <dd>その番組にエピソードを登録していない人は並べ替えできません。「聞く順 → 自分で決めた順」なら誰でも自分用に順番を決められます。</dd>
+          <dt>YouTube の曲が書き出せない</dt>
+          <dd>YouTube の曲は仕組み上、音声ファイルに書き出せません。</dd>
+          <dt>スマホで画面を消すと止まる</dt>
+          <dd>YouTube は画面を消すと止まります（YouTube側の仕様）。Drive や外部URLの音声は続けて再生できます。</dd>
+          <dt>マイクが使えない</dt>
+          <dd>ブラウザでマイクの使用を「許可」にしてください。</dd>
+        </dl>
+      </section>
+
     </div>
   </div>
 </div>

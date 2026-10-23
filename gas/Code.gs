@@ -4,6 +4,7 @@
  *   v1.1.0 パーソナリティ管理 / 台本の掛け合い（複数話者TTS） / AIとの対話（文字起こし＋声変換）
  *   v1.2.0 楽曲ライブラリ（1人20セット） / 台本の保存（1人50セット） / 読み上げに指示文を入れない
  *   v1.3.0 番組表（曲No・掛け合いNoの順番で放送）を保存
+ *   v1.4.0 ポッドキャストのエピソード並び順（番組ごと・全員共通）と聞く順（1人ずつ）を保存
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -16,7 +17,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -34,6 +35,7 @@ const MAX_LIBRARIES = 20;                      // 楽曲ライブラリ：1人�
 const MAX_LIBRARY_TRACKS = 500;                // 1セットの曲数
 const MAX_SCRIPTS = 50;                        // 台本：1人あたりのセット数
 const MAX_SCRIPT_CHARS = 20000;                // 台本1セットの文字数
+const MAX_SHOW_EPISODES = 1000;                // 並び順に入れられるエピソード数
 
 const HEAD = {
   Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
@@ -45,7 +47,9 @@ const HEAD = {
   Personas:     ['id', 'name', 'icon', 'color', 'gender', 'voice', 'role', 'description', 'style', 'prompt', 'ownerId', 'ownerName', 'createdAt', 'updatedAt'],
   Libraries:    ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt'],
   Scripts:      ['id', 'ownerId', 'title', 'text', 'cast', 'createdAt', 'updatedAt'],
-  Programs:     ['ownerId', 'items', 'updatedAt']
+  Programs:     ['ownerId', 'items', 'updatedAt'],
+  ShowOrders:   ['showName', 'trackIds', 'updatedBy', 'updatedAt'],
+  ListenOrders: ['ownerId', 'showName', 'mode', 'trackIds', 'updatedAt']
 };
 
 /* ============================================================
@@ -176,6 +180,9 @@ const ROUTES = {
   track_add: trackAdd_,
   track_delete: trackDelete_,
   audio_get: audioGet_,
+  // ポッドキャストの並び順・聞く順
+  show_order_save: showOrderSave_,
+  listen_order_save: listenOrderSave_,
   // AI DJ
   dj_talk: djTalk_,
   // パーソナリティ
@@ -420,10 +427,63 @@ function hash_(password, salt) {
  *  楽曲・ポッドキャスト
  * ============================================================ */
 function tracksList_(req) {
-  auth_(req);
+  const user = auth_(req);
   const list = readAll_('Tracks').map(publicTrack_);
   list.sort(function (a, b) { return b.createdAt - a.createdAt; });
-  return { tracks: list };
+  const showOrders = {};
+  readAll_('ShowOrders').forEach(function (r) { showOrders[String(r.showName)] = parseJsonArr_(r.trackIds); });
+  const listenOrders = {};
+  readAll_('ListenOrders').forEach(function (r) {
+    if (r.ownerId !== user.userId) return;
+    listenOrders[String(r.showName)] = { mode: String(r.mode || 'order'), trackIds: parseJsonArr_(r.trackIds) };
+  });
+  return { tracks: list, showOrders: showOrders, listenOrders: listenOrders };
+}
+
+/* ---------- ポッドキャスト：エピソードの並び順（番組ごと・全員共通） ---------- */
+const LISTEN_MODES = ['order', 'reverse', 'shuffle', 'custom'];
+
+/** 番組 showName のエピソードだけに絞った、重複なしの ID 配列 */
+function showEpisodeIds_(showName, ids) {
+  const eps = {};
+  readAll_('Tracks').forEach(function (t) {
+    if (t.kind === 'podcast' && String(t.showName || '') === showName) eps[t.id] = t;
+  });
+  const out = (Array.isArray(ids) ? ids : []).map(String)
+    .filter(function (x, i, a) { return eps[x] && a.indexOf(x) === i; })
+    .slice(0, MAX_SHOW_EPISODES);
+  return { ids: out, eps: eps };
+}
+
+function showOrderSave_(req) {
+  const user = auth_(req);
+  const showName = String(req.showName || '').trim().slice(0, 60);
+  const r = showEpisodeIds_(showName, req.trackIds);
+  const mine = Object.keys(r.eps).some(function (id) { return r.eps[id].ownerId === user.userId; });
+  if (!mine && user.role !== 'admin') throw apiErr_('並べ替えできるのは、この番組にエピソードを登録した人か管理者だけです');
+  withLock_(function () {
+    const row = readAll_('ShowOrders').filter(function (x) { return String(x.showName) === showName; })[0];
+    const patch = { trackIds: JSON.stringify(r.ids), updatedBy: user.userId, updatedAt: now_() };
+    if (row) update_('ShowOrders', row, patch);
+    else append_('ShowOrders', Object.assign({ showName: showName }, patch));
+  });
+  return { showName: showName, trackIds: r.ids };
+}
+
+/* ---------- ポッドキャスト：聞く順（1人ずつ・番組ごと） ---------- */
+function listenOrderSave_(req) {
+  const user = auth_(req);
+  const showName = String(req.showName || '').trim().slice(0, 60);
+  const mode = LISTEN_MODES.indexOf(String(req.mode)) >= 0 ? String(req.mode) : 'order';
+  const ids = showEpisodeIds_(showName, req.trackIds).ids;
+  if (mode === 'custom' && !ids.length) throw apiErr_('聞くエピソードを1つ以上選んでください');
+  withLock_(function () {
+    const row = readAll_('ListenOrders').filter(function (x) { return x.ownerId === user.userId && String(x.showName) === showName; })[0];
+    const patch = { mode: mode, trackIds: JSON.stringify(ids), updatedAt: now_() };
+    if (row) update_('ListenOrders', row, patch);
+    else append_('ListenOrders', Object.assign({ ownerId: user.userId, showName: showName }, patch));
+  });
+  return { showName: showName, mode: mode, trackIds: ids };
 }
 
 function trackAdd_(req) {
