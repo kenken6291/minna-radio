@@ -1,4 +1,4 @@
-# NEON WAVE RADIO（minna-radio）v1.4.0
+# NEON WAVE RADIO（minna-radio）v1.5.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
@@ -55,8 +55,9 @@ minna-radio/
 | Programs | ownerId, items(JSON), updatedAt |
 | ShowOrders | showName, trackIds(JSON), updatedBy, updatedAt |
 | ListenOrders | ownerId, showName, mode(order/reverse/shuffle/custom), trackIds(JSON), updatedAt |
+| PodLists | id, ownerId, name, trackIds(JSON), createdAt, updatedAt |
 
-※ Personas / Libraries / Scripts / Programs / ShowOrders / ListenOrders シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ Personas / Libraries / Scripts / Programs / ShowOrders / ListenOrders / PodLists シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
 
 日時はすべてミリ秒の数値（テキスト書式）で保存しています。
 
@@ -87,6 +88,15 @@ minna-radio/
 - スマホで画面を消すと YouTube は止まります（YouTube側の仕様）。Drive／外部URLの曲はロック画面の操作に対応。
 - iPhone では音量スライダーが外部URL・YouTube に効かない場合があります（端末の音量ボタンで調整）。
 - **AIパーソナリティ**は「スタジオ → パーソナリティ」で作成・編集・複製・削除できます（声30種類から選択、話し方・キャラクター設定も自由）。標準の5人は `Code.gs` の `BUILTIN_PERSONAS` にあり、画面からは編集できません（複製して使う）。
+
+## v1.5.0 の変更点
+
+- **ポッドキャスト再生リスト**（ポッドキャスト画面の上）：1人20セット、1セット100話まで。番組をまたいで好きな話を選び、好きな順番で連続再生。
+  - 「✎ 選んで並べる」：左で選ぶ（絞り込み検索・番組ごとに全部入れる）→ 右で並べる（⤒ ↑ ↓ ⤓ ✕、番号指定で移動、番組の並び順／タイトル順／逆順／シャッフルで一括整列）。
+  - 各エピソードの 📃 で、選んでいる再生リストに入れる・外す。リストの行を押すとその話から再生。
+  - サーバー（PodLists）に保存。スマホと PC で共通。
+- **まとめて登録（最大100件）**：ファイルは複数選択、URL は1行に1つ。ファイル名順に1件ずつ登録し、進み具合を表示。キャンセルで残りを中止。ポッドキャストは「再生リストにも入れる」で登録と同時にリストへ追加。
+- Code.gs を更新しています。**GAS を新バージョンで再デプロイ**してください（setup の再実行は不要）。
 
 ## v1.4.0 の変更点
 

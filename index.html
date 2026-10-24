@@ -191,6 +191,24 @@
           <button class="btn btn-primary" data-add-kind="podcast">＋ エピソードを登録</button>
         </div>
       </div>
+      <section class="panel podlist-panel" id="podlistPanel">
+        <div class="panel-head">
+          <h2 class="panel-title">📃 再生リスト <span class="count" id="plCount"></span></h2>
+          <div class="pl-actions">
+            <button class="btn btn-primary btn-small" id="btnPlPlay">▶ 再生</button>
+            <button class="btn btn-ghost btn-small" id="btnPlEdit">✎ 選んで並べる</button>
+          </div>
+        </div>
+        <div class="lib-row">
+          <select id="plSelect" aria-label="使う再生リスト"></select>
+          <button class="icon-btn" id="btnPlNew" title="新しい再生リスト" aria-label="新しい再生リスト">＋</button>
+          <button class="icon-btn" id="btnPlRename" title="名前を変える" aria-label="再生リストの名前を変える">✎</button>
+          <button class="icon-btn" id="btnPlDelete" title="再生リストを削除" aria-label="再生リストを削除">🗑</button>
+          <span class="lib-count" id="plSets"></span>
+        </div>
+        <ol class="pl-items" id="plItems"></ol>
+        <button class="btn btn-ghost btn-small pl-more" id="btnPlMore" hidden></button>
+      </section>
       <div id="podcastShows" class="shows"></div>
     </section>
 
@@ -488,13 +506,18 @@
           <option value="url">外部の音声ファイル URL</option>
         </select></label>
       <label class="field" data-src="upload"><span>音声ファイル（<span id="maxMb"></span>MBまで）</span>
-        <input type="file" name="file" accept="audio/*"></label>
+        <input type="file" name="file" accept="audio/*" multiple>
+        <small class="hint">まとめて選べます（最大100件）。ファイル名の順に登録します。</small></label>
       <label class="field" data-src="link" hidden><span id="atUrlLabel">URL</span>
-        <input type="url" name="url" placeholder="https://"></label>
-      <label class="field"><span>タイトル</span><input type="text" name="title" maxlength="80" required></label>
+        <textarea name="url" rows="3" placeholder="https://" spellcheck="false"></textarea>
+        <small class="hint">複数あるときは 1行に1つずつ（最大100件）。</small></label>
+      <label class="field"><span>タイトル</span><input type="text" name="title" maxlength="76">
+        <small class="hint">空欄ならファイル名から付けます。複数登録で入力すると「タイトル 1」「タイトル 2」…になります。</small></label>
       <label class="field" data-kind-only="song"><span>アーティスト</span><input type="text" name="artist" maxlength="60"></label>
       <label class="field" data-kind-only="podcast" hidden><span>番組名</span><input type="text" name="showName" maxlength="60"></label>
       <label class="field"><span>説明（任意）</span><textarea name="description" rows="2" maxlength="500"></textarea></label>
+      <label class="switch" data-kind-only="podcast" id="atToPlWrap" hidden><input type="checkbox" name="toPodlist" checked><span class="switch-ui"></span><span id="atToPlLabel">再生リストにも入れる</span></label>
+      <p class="at-progress" id="atProgress" hidden></p>
       <label class="switch" data-kind-only="song"><input type="checkbox" name="aiGenerated"><span class="switch-ui"></span><span>AIで生成したオリジナル曲</span></label>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
@@ -580,6 +603,36 @@
   </div>
 </div>
 
+
+<!-- ===================== 再生リストの編集 ===================== -->
+<div class="modal" id="modalPodList" hidden>
+  <div class="modal-card modal-card-pl" role="dialog" aria-modal="true" aria-labelledby="pleTitle">
+    <h3 id="pleTitle">再生リストを編集</h3>
+    <p class="ex-target" id="pleName"></p>
+    <div class="ple-grid">
+      <section class="ple-col">
+        <h4 class="ple-h">① エピソードを選ぶ <span class="count" id="pleSel"></span></h4>
+        <input type="search" class="ple-search" id="pleSearch" data-nofocus placeholder="タイトル・番組名で絞り込み">
+        <div class="ple-src" id="pleSrc"></div>
+      </section>
+      <section class="ple-col">
+        <h4 class="ple-h">② 再生する順番 <span class="count" id="pleCount"></span></h4>
+        <div class="lo-tools" id="pleTools">
+          <button type="button" class="chip" data-ple="show">番組の並び順</button>
+          <button type="button" class="chip" data-ple="title">タイトル順</button>
+          <button type="button" class="chip" data-ple="reverse">逆順</button>
+          <button type="button" class="chip" data-ple="shuffle">シャッフル</button>
+          <button type="button" class="chip" data-ple="clear">全部はずす</button>
+        </div>
+        <ol class="ple-order" id="pleOrder"></ol>
+      </section>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+      <button type="button" class="btn btn-primary" id="btnPleSave">この順番で保存</button>
+    </div>
+  </div>
+</div>
 
 <!-- ===================== 聞く順を決める ===================== -->
 <div class="modal" id="modalListen" hidden>
@@ -670,6 +723,24 @@
           <li>「番組名」を入れます。同じ番組名のエピソードは1つの番組にまとまります（例：小説朗読）。</li>
           <li>タイトルと音声（Drive・外部URL・YouTube）を指定して登録します。</li>
         </ol>
+        <h4>まとめて登録（最大100件）</h4>
+        <ul>
+          <li>音声ファイルは、ファイル選択で複数をまとめて選べます（最大100件・1件20MBまで）。ファイル名の順に登録します。</li>
+          <li>URL・YouTube・Drive の共有リンクは、1行に1つずつ書けばまとめて登録できます。</li>
+          <li>再生リストを選んでいるときは「再生リストにも入れる」をオンにすると、登録した話がそのまま再生リストの最後に入ります。</li>
+          <li>登録中に「キャンセル」を押すと、残りの登録を中止します（登録済みの分は残ります）。</li>
+        </ul>
+        <h4>📃 再生リスト（番組をまたいで100話まで）</h4>
+        <ol>
+          <li>再生リストの <b>＋</b> で新しいリストを作ります（20セットまで）。</li>
+          <li><b>✎ 選んで並べる</b> を押し、左の「① エピソードを選ぶ」でチェックを入れます。番組ごとの「全部入れる」も使えます。</li>
+          <li>右の「② 再生する順番」で ⤒ ↑ ↓ ⤓ を使って並べ替えます。番号を押すと何番目に移動するか指定できます。「番組の並び順」「タイトル順」でまとめて整列もできます。</li>
+          <li><b>この順番で保存</b> → <b>▶ 再生</b> で、上から順番に流れます。リストの行を押すと、その話から再生します。</li>
+        </ol>
+        <ul>
+          <li>各エピソードの <b>📃</b> を押すと、選んでいる再生リストに入れたり外したりできます。</li>
+          <li>再生リストはあなた専用です（スマホと PC で共通）。</li>
+        </ul>
         <h4>聞く</h4>
         <ul>
           <li><b>▶ 聞く順に再生</b> を押すと、その番組を「聞く順」で最後まで続けて再生します。</li>

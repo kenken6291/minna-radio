@@ -1,11 +1,12 @@
 /**
- * NEON WAVE RADIO - app.js  v1.4.0
+ * NEON WAVE RADIO - app.js  v1.5.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
  * v1.3.0：番組表（曲No・掛け合いNoの順番で放送）/ 台本一覧
  * v1.3.1：ライブラリ内の曲の並べ替え（一番上・1つ上・1つ下・一番下・番号を指定）
  * v1.4.0：使い方ガイド / ポッドキャストのエピソード並べ替え（全員共通）/ 聞く順の設定（自分用）
+ * v1.5.0：ポッドキャスト再生リスト（20セット×100話・選択と順番指定）/ まとめて登録（最大100件）
  */
 'use strict';
 (() => {
@@ -79,6 +80,7 @@
     listenOrders: {},        // 番組ごとの聞く順（自分用）
     podSort: null,           // 並べ替え中の番組キー
     podQueue: false,         // ポッドキャストを聞く順で再生中（DJトーク・シャッフルを挟まない）
+    podlists: [], plId: '', plMax: 20, plMaxItems: 100, plExpand: false,   // ポッドキャスト再生リスト
     queue: [],
     idx: -1,
     playing: false,
@@ -124,6 +126,7 @@
       }
       if (p.script && p.script.text) state.legacyScript = { text: String(p.script.text), cast: p.script.cast || {} };  // v1.1 からの引き継ぎ
       if (typeof p.libId === 'string') state.libId = p.libId;
+      if (typeof p.plId === 'string') state.plId = p.plId;
       if (typeof p.scriptId === 'string') state.scriptId = p.scriptId;
       if (Array.isArray(p.rundown)) {
         state.rundown = p.rundown.filter((x) => x && typeof x.sid === 'string')
@@ -148,7 +151,7 @@
       localStorage.setItem(CONFIG.PREFS_KEY, JSON.stringify({
         persona: state.persona, between: state.between, fx: state.fx,
         volume: state.volume, shuffle: state.shuffle, loop: state.loop,
-        libId: state.libId, scriptId: state.scriptId, rundown: state.rundown,
+        libId: state.libId, plId: state.plId, scriptId: state.scriptId, rundown: state.rundown,
         convo: {
           me: state.convo.me, ai: state.convo.ai, theme: state.convo.theme, silence: state.convo.silence,
           convert: state.convo.convert, continuous: state.convo.continuous
@@ -358,6 +361,7 @@
     loadPersonas();
     loadTracks();
     loadLibraries();
+    loadPodlists();
     loadScripts().then(loadProgram);
     const hash = location.hash.replace('#', '');
     showView(VIEWS.includes(hash) ? hash : 'radio');
@@ -1366,7 +1370,8 @@
           <button class="icon-btn" data-mv="bottom" data-id="${esc(t.id)}" title="一番下へ" aria-label="一番下へ"${no === total ? ' disabled' : ''}>⤓</button>
         </div>` : `<div class="track-actions">
           <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
-          ${t.kind === 'song' ? `<button class="icon-btn" data-libpick="${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
+          ${t.kind === 'podcast' && state.plId ? `<button class="icon-btn pl-pick${plHas(t.id) ? ' is-in' : ''}" data-plpick="${esc(t.id)}" title="${plHas(t.id) ? '再生リストから外す' : '再生リストに入れる'}" aria-label="${plHas(t.id) ? '再生リストから外す' : '再生リストに入れる'}">📃</button>` : ''}
+          ${t.kind === 'song' ? `<button class="icon-btn" data-libpick=""${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
           ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
           ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
@@ -1703,6 +1708,7 @@
         </article>`;
       }).join('')
       : '<p class="empty">ポッドキャストはまだありません。「＋ エピソードを登録」から追加できます</p>';
+    renderPodlistPanel();
     markCurrentInLists();
   }
 
@@ -1891,6 +1897,307 @@
     });
   }
 
+  /* =========================================================
+   *  ポッドキャスト再生リスト（番組をまたいで選択・順番指定。1人20セット×100話）
+   * ========================================================= */
+  const PL_PREVIEW = 8;
+  const plById = (id) => state.podlists.find((l) => l.id === id);
+  const curPl = () => plById(state.plId);
+  const plHas = (id) => { const pl = curPl(); return !!pl && pl.trackIds.includes(id); };
+  const podById = (id) => state.tracks.find((t) => t.id === id && t.kind === 'podcast');
+  const plTracks = (pl) => (pl ? pl.trackIds.map(podById).filter(Boolean) : []);
+
+  async function loadPodlists() {
+    try {
+      const d = await api('podlists_list');
+      state.podlists = d.podlists || [];
+      state.plMax = d.max || 20;
+      state.plMaxItems = d.maxItems || 100;
+    } catch (e) { /* 旧GASでは未対応 */ state.podlists = []; }
+    if (state.plId && !curPl()) state.plId = '';
+    if (!state.plId && state.podlists.length) state.plId = state.podlists[0].id;
+    renderPodcasts();
+  }
+
+  function renderPodlistPanel() {
+    const panel = $('#podlistPanel');
+    if (!panel) return;
+    const pl = curPl();
+    const sel = $('#plSelect');
+    sel.innerHTML = state.podlists.length
+      ? state.podlists.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}（${plTracks(l).length}）</option>`).join('')
+      : '<option value="">（再生リストはまだありません）</option>';
+    sel.value = state.plId;
+    $('#plSets').textContent = `${state.podlists.length} / ${state.plMax}`;
+    $('#btnPlRename').disabled = !pl;
+    $('#btnPlDelete').disabled = !pl;
+    const items = plTracks(pl);
+    $('#plCount').textContent = pl ? `${items.length} / ${state.plMaxItems} 話` : '';
+    $('#btnPlPlay').disabled = !items.length;
+    $('#btnPlEdit').textContent = pl ? '✎ 選んで並べる' : '＋ 作って選ぶ';
+    const shown = state.plExpand ? items : items.slice(0, PL_PREVIEW);
+    $('#plItems').innerHTML = !pl
+      ? '<li class="empty">「＋」で再生リストを作ると、番組をまたいで好きな話を好きな順番で流せます（100話まで）</li>'
+      : items.length
+        ? shown.map((t, i) => `
+          <li class="pl-item" data-track-id="${esc(t.id)}">
+            <button class="pl-row" data-plplay="${i}" aria-label="「${esc(t.title)}」から再生">
+              <span class="pl-no">${i + 1}</span>
+              <span class="pl-title">${esc(t.title)}</span>
+              <span class="pl-show">${esc(showLabel(showKeyOf(t)))}</span>
+            </button>
+          </li>`).join('')
+        : '<li class="empty">まだ空っぽです。「✎ 選んで並べる」か、各エピソードの 📃 で入れてください</li>';
+    const more = $('#btnPlMore');
+    more.hidden = items.length <= PL_PREVIEW;
+    more.textContent = state.plExpand ? '▲ たたむ' : `▼ すべて表示（${items.length}話）`;
+    markCurrentInLists();
+  }
+
+  async function savePodlist(pl) {
+    const d = await api('podlist_save', { podlist: { id: pl.id, name: pl.name, trackIds: pl.trackIds } });
+    const i = state.podlists.findIndex((l) => l.id === d.podlist.id);
+    if (i >= 0) state.podlists[i] = d.podlist; else state.podlists.push(d.podlist);
+    return d.podlist;
+  }
+
+  async function createPodlist() {
+    if (state.podlists.length >= state.plMax) { toast(`再生リストは ${state.plMax} セットまでです`, true); return null; }
+    const name = (prompt('新しい再生リストの名前', `再生リスト ${state.podlists.length + 1}`) || '').trim();
+    if (!name) return null;
+    try {
+      const pl = await savePodlist({ name, trackIds: [] });
+      state.plId = pl.id;
+      state.plExpand = false;
+      savePrefs();
+      renderPodcasts();
+      toast(`再生リスト「${pl.name}」を作りました`);
+      return pl;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  function playPodlist(start = 0) {
+    const items = plTracks(curPl());
+    if (!items.length) { toast('再生リストが空です'); return; }
+    if (start === 0) toast(`再生リスト「${curPl().name}」を再生します（全${items.length}話）`);
+    playList(items, start, { podcast: true });
+  }
+
+  async function togglePlItem(id) {
+    const pl = curPl();
+    if (!pl) return;
+    const before = pl.trackIds;
+    const has = before.includes(id);
+    if (!has && plTracks(pl).length >= state.plMaxItems) { toast(`1つの再生リストは ${state.plMaxItems} 話までです`, true); return; }
+    pl.trackIds = has ? before.filter((x) => x !== id) : before.concat(id);
+    renderPodcasts();
+    try {
+      await savePodlist(pl);
+      toast(has ? '再生リストから外しました' : `再生リスト「${pl.name}」の${plTracks(pl).length}番目に入れました`);
+    } catch (e) { pl.trackIds = before; renderPodcasts(); toast(e.message, true); }
+    renderPodcasts();
+  }
+
+  /* ---------- 編集画面 ---------- */
+  const ple = { ids: [], q: '' };
+
+  function openPodlistEditor() {
+    const pl = curPl();
+    if (!pl) return;
+    ple.ids = plTracks(pl).map((t) => t.id);
+    ple.q = '';
+    $('#pleSearch').value = '';
+    $('#pleName').textContent = pl.name;
+    renderPle();
+    openModal('modalPodList');
+  }
+
+  function renderPle() {
+    const full = ple.ids.length >= state.plMaxItems;
+    const pos = new Map(ple.ids.map((id, i) => [id, i + 1]));
+    const q = ple.q.normalize('NFKC').toLowerCase();
+    const keys = [];
+    state.tracks.forEach((t) => { if (t.kind === 'podcast' && !keys.includes(showKeyOf(t))) keys.push(showKeyOf(t)); });
+    const groups = keys.map((key) => {
+      const eps = showEpisodes(key).filter((t) => !q ||
+        (t.title + ' ' + showLabel(key)).normalize('NFKC').toLowerCase().includes(q));
+      return { key, eps };
+    }).filter((g) => g.eps.length);
+    $('#pleSrc').innerHTML = groups.length ? groups.map((g) => {
+      const allIn = g.eps.every((t) => pos.has(t.id));
+      return `
+        <div class="ple-group">
+          <div class="ple-group-head">
+            <span class="ple-group-name">${esc(showLabel(g.key))}</span>
+            <button type="button" class="chip" data-ple-all="${esc(g.key)}" data-on="${allIn ? '0' : '1'}">${allIn ? '全部はずす' : '全部入れる'}</button>
+          </div>
+          ${g.eps.map((t, i) => {
+            const n = pos.get(t.id);
+            return `<label class="ple-src-item${n ? ' is-on' : ''}">
+              <input type="checkbox" data-ple-pick="${esc(t.id)}"${n ? ' checked' : ''}${!n && full ? ' disabled' : ''}>
+              <span class="track-no">EP${i + 1}</span><span class="ple-src-title">${esc(t.title)}</span>
+              ${n ? `<span class="ple-badge">${n}</span>` : ''}
+            </label>`;
+          }).join('')}
+        </div>`;
+    }).join('') : '<p class="empty">該当するエピソードがありません</p>';
+
+    const last = ple.ids.length;
+    $('#pleOrder').innerHTML = ple.ids.length ? ple.ids.map((id, i) => {
+      const t = podById(id);
+      const no = i + 1;
+      return `
+        <li class="ple-row">
+          <button type="button" class="track-no track-no-btn ple-no" data-ple-to="${i}" title="番号を指定して移動">${no}</button>
+          <span class="ple-row-main"><span class="ple-row-title">${esc(t.title)}</span><span class="ple-row-show">${esc(showLabel(showKeyOf(t)))}</span></span>
+          <span class="ple-move">
+            <button type="button" class="icon-btn" data-ple-mv="top" data-i="${i}" aria-label="一番上へ"${no === 1 ? ' disabled' : ''}>⤒</button>
+            <button type="button" class="icon-btn" data-ple-mv="up" data-i="${i}" aria-label="1つ上へ"${no === 1 ? ' disabled' : ''}>↑</button>
+            <button type="button" class="icon-btn" data-ple-mv="down" data-i="${i}" aria-label="1つ下へ"${no === last ? ' disabled' : ''}>↓</button>
+            <button type="button" class="icon-btn" data-ple-mv="bottom" data-i="${i}" aria-label="一番下へ"${no === last ? ' disabled' : ''}>⤓</button>
+            <button type="button" class="icon-btn ple-x" data-ple-x="${i}" aria-label="リストから外す">✕</button>
+          </span>
+        </li>`;
+    }).join('') : '<li class="empty">左でチェックを入れた順に、ここに並びます</li>';
+    $('#pleSel').textContent = full ? `（上限 ${state.plMaxItems} 話に達しました）` : '';
+    $('#pleCount').textContent = `${ple.ids.length} / ${state.plMaxItems} 話`;
+  }
+
+  function pleMove(from, to) {
+    to = Math.max(0, Math.min(ple.ids.length - 1, to));
+    if (to === from) return;
+    const [id] = ple.ids.splice(from, 1);
+    ple.ids.splice(to, 0, id);
+    renderPle();
+    const row = $$('#pleOrder .ple-row')[to];
+    if (row) { row.classList.add('is-moved'); row.scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function bindPodlist() {
+    $('#plSelect').addEventListener('change', (e) => {
+      state.plId = e.target.value;
+      state.plExpand = false;
+      savePrefs();
+      renderPodcasts();
+    });
+    $('#btnPlNew').addEventListener('click', createPodlist);
+    $('#btnPlRename').addEventListener('click', async () => {
+      const pl = curPl();
+      if (!pl) return;
+      const name = (prompt('再生リストの名前', pl.name) || '').trim();
+      if (!name || name === pl.name) return;
+      try { await savePodlist(Object.assign({}, pl, { name })); renderPodcasts(); toast('名前を変えました'); } catch (e) { toast(e.message, true); }
+    });
+    $('#btnPlDelete').addEventListener('click', async () => {
+      const pl = curPl();
+      if (!pl || !confirm(`再生リスト「${pl.name}」を削除しますか？（エピソードそのものは消えません）`)) return;
+      try {
+        const d = await api('podlist_delete', { id: pl.id });
+        state.podlists = state.podlists.filter((l) => l.id !== pl.id);
+        state.plId = state.podlists[0] ? state.podlists[0].id : '';
+        savePrefs();
+        renderPodcasts();
+        toast(d.message);
+      } catch (e) { toast(e.message, true); }
+    });
+    $('#btnPlPlay').addEventListener('click', () => playPodlist(0));
+    $('#btnPlEdit').addEventListener('click', async () => {
+      if (!curPl() && !(await createPodlist())) return;
+      openPodlistEditor();
+    });
+    $('#btnPlMore').addEventListener('click', () => { state.plExpand = !state.plExpand; renderPodlistPanel(); });
+    $('#plItems').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-plplay]');
+      if (b) playPodlist(Number(b.dataset.plplay));
+    });
+    $('#podcastShows').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-plpick]');
+      if (b) togglePlItem(b.dataset.plpick);
+    });
+
+    // 編集画面
+    $('#pleSearch').addEventListener('input', (e) => { ple.q = e.target.value; renderPle(); });
+    $('#pleSrc').addEventListener('change', (e) => {
+      const cb = e.target.closest('[data-ple-pick]');
+      if (!cb) return;
+      const id = cb.dataset.plePick;
+      if (cb.checked) {
+        if (ple.ids.length >= state.plMaxItems) { cb.checked = false; toast(`${state.plMaxItems} 話までです`, true); return; }
+        if (!ple.ids.includes(id)) ple.ids.push(id);
+      } else {
+        ple.ids = ple.ids.filter((x) => x !== id);
+      }
+      renderPle();
+    });
+    $('#pleSrc').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ple-all]');
+      if (!b) return;
+      const eps = showEpisodes(b.dataset.pleAll);
+      if (b.dataset.on === '1') {
+        let added = 0;
+        for (const t of eps) {
+          if (ple.ids.includes(t.id)) continue;
+          if (ple.ids.length >= state.plMaxItems) { toast(`${state.plMaxItems} 話までなので、途中までにしました`, true); break; }
+          ple.ids.push(t.id);
+          added++;
+        }
+        if (added) toast(`${added}話を入れました`);
+      } else {
+        const set = new Set(eps.map((t) => t.id));
+        ple.ids = ple.ids.filter((id) => !set.has(id));
+      }
+      renderPle();
+    });
+    $('#pleOrder').addEventListener('click', (e) => {
+      const mv = e.target.closest('[data-ple-mv]');
+      if (mv && !mv.disabled) {
+        const i = Number(mv.dataset.i);
+        const to = { top: 0, up: i - 1, down: i + 1, bottom: ple.ids.length - 1 }[mv.dataset.pleMv];
+        pleMove(i, to);
+        return;
+      }
+      const x = e.target.closest('[data-ple-x]');
+      if (x) { ple.ids.splice(Number(x.dataset.pleX), 1); renderPle(); return; }
+      const to = e.target.closest('[data-ple-to]');
+      if (to) {
+        const n = ple.ids.length;
+        const v = Number(String(prompt(`何番目に移動しますか？（1〜${n}）`) || '').normalize('NFKC').trim());
+        if (Number.isInteger(v) && v >= 1) pleMove(Number(to.dataset.pleTo), Math.min(v, n) - 1);
+      }
+    });
+    $('#pleTools').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ple]');
+      if (!b || !ple.ids.length) return;
+      const k = b.dataset.ple;
+      if (k === 'clear') { if (confirm('選んだエピソードを全部はずしますか？')) ple.ids = []; }
+      else if (k === 'reverse') ple.ids.reverse();
+      else if (k === 'shuffle') ple.ids = shuffled(ple.ids);
+      else if (k === 'title') {
+        ple.ids.sort((a, b2) => podById(a).title.normalize('NFKC').localeCompare(podById(b2).title.normalize('NFKC'), 'ja', { numeric: true }));
+      } else if (k === 'show') {
+        const rank = new Map();
+        let r = 0;
+        const keys = [];
+        ple.ids.forEach((id) => { const key = showKeyOf(podById(id)); if (!keys.includes(key)) keys.push(key); });
+        keys.forEach((key) => showEpisodes(key).forEach((t) => rank.set(t.id, r++)));
+        ple.ids.sort((a, b2) => rank.get(a) - rank.get(b2));
+      }
+      renderPle();
+    });
+    $('#btnPleSave').addEventListener('click', async (e) => {
+      const pl = curPl();
+      if (!pl) return;
+      await withBusy(e.currentTarget, '保存中…', async () => {
+        try {
+          await savePodlist(Object.assign({}, pl, { trackIds: ple.ids.slice() }));
+          closeModal('modalPodList');
+          renderPodcasts();
+          toast(`再生リスト「${pl.name}」を保存しました（${ple.ids.length}話）`);
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+  }
+
   function listByName(name) {
     if (name === 'songs') return lists.songs;
     return lists.shows[showKeyByIndex(name.split(':')[1])] || [];
@@ -1898,7 +2205,7 @@
 
   function markCurrentInLists() {
     const cur = state.queue[state.idx];
-    $$('.track').forEach((li) => li.classList.toggle('is-current', !!cur && li.dataset.trackId === cur.id));
+    $$('.track, .pl-item').forEach((li) => li.classList.toggle('is-current', !!cur && li.dataset.trackId === cur.id));
   }
 
   function addNext(id) {
@@ -1965,6 +2272,13 @@
     });
     $('#atSource').addEventListener('change', updateAddSource);
     $('#addTrackForm').addEventListener('submit', submitAddTrack);
+    $('#modalAddTrack').addEventListener('click', (e) => {
+      if (!bulkRunning) return;
+      if (e.target === e.currentTarget || e.target.closest('[data-close]')) {
+        bulkCancel = true;
+        toast('残りの登録を中止します（登録済みの分は残ります）');
+      }
+    }, true);
     bindLibrarySets();
   }
 
@@ -1989,53 +2303,131 @@
     $('#addTrackForm').reset();
     setAddKind(kind || 'song');
     updateAddSource();
+    $('#atProgress').hidden = true;
+    const pl = curPl();
+    $('#atToPlWrap').hidden = (kind || 'song') !== 'podcast' || !pl;
+    if (pl) $('#atToPlLabel').textContent = `再生リスト「${pl.name}」にも入れる`;
     openModal('modalAddTrack');
+  }
+
+  const MAX_BULK = 100;
+  let bulkCancel = false;
+  let bulkRunning = false;
+
+  /** URL からタイトルの候補を作る */
+  function titleFromUrl(url, src, i) {
+    if (src === 'youtube') return `YouTube ${i + 1}`;
+    if (src === 'drivelink') return `Drive ${i + 1}`;
+    try {
+      const seg = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || '');
+      return seg.replace(/\.[^.]+$/, '') || `エピソード ${i + 1}`;
+    } catch (e) { return `エピソード ${i + 1}`; }
   }
 
   async function submitAddTrack(e) {
     e.preventDefault();
     const f = e.target;
     const src = f.source.value;
-    const payload = {
+    const base = f.title.value.trim();
+    const common = {
       kind: addKind,
-      title: f.title.value.trim(),
       artist: f.artist.value.trim(),
       showName: f.showName.value.trim(),
       description: f.description.value.trim(),
       aiGenerated: addKind === 'song' && f.aiGenerated.checked
     };
-    if (src === 'upload') {
-      const file = f.file.files[0];
-      if (!file) { toast('音声ファイルを選んでください', true); return; }
-      if (!file.type.startsWith('audio/')) { toast('音声ファイルを選んでください', true); return; }
-      if (file.size > CONFIG.MAX_UPLOAD_MB * 1024 * 1024) { toast(`ファイルが大きすぎます（${CONFIG.MAX_UPLOAD_MB}MBまで）`, true); return; }
-      payload.source = 'drive';
-      payload.mimeType = file.type;
-      payload.fileName = file.name;
-      if (!payload.title) payload.title = file.name.replace(/\.[^.]+$/, '');
-    } else {
-      const url = f.url.value.trim();
-      if (!url) { toast('URL を入力してください', true); return; }
-      payload.source = src === 'drivelink' ? 'drive' : src;
-      payload.url = url;
-    }
-    if (!payload.title) { toast('タイトルを入力してください', true); return; }
 
-    await withBusy($('#atSubmit'), src === 'upload' ? 'アップロード中…' : '登録中…', async () => {
-      try {
-        if (src === 'upload') payload.fileBase64 = await blobToBase64(f.file.files[0]);
-        const d = await api('track_add', payload);
-        const lib = libById(state.libId);
-        if (lib && addKind === 'song' && d.track) {
-          try { await saveLibrary(Object.assign({}, lib, { trackIds: lib.trackIds.concat(d.track.id) })); } catch (e2) { /* 全曲には登録済み */ }
-          toast(`${d.message}（ライブラリ「${lib.name}」にも追加）`);
-        } else {
-          toast(d.message);
+    // 登録する項目を集める
+    let jobs = [];
+    const skipped = [];
+    if (src === 'upload') {
+      const files = [...f.file.files].sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+      if (!files.length) { toast('音声ファイルを選んでください', true); return; }
+      if (files.length > MAX_BULK) { toast(`一度に登録できるのは ${MAX_BULK} 件までです（${files.length} 件選ばれています）`, true); return; }
+      files.forEach((file) => {
+        if (!file.type.startsWith('audio/')) { skipped.push(`${file.name}（音声ではありません）`); return; }
+        if (file.size > CONFIG.MAX_UPLOAD_MB * 1024 * 1024) { skipped.push(`${file.name}（${CONFIG.MAX_UPLOAD_MB}MB超）`); return; }
+        jobs.push({ file, auto: file.name.replace(/\.[^.]+$/, '') });
+      });
+    } else {
+      const urls = f.url.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      if (!urls.length) { toast('URL を入力してください', true); return; }
+      if (urls.length > MAX_BULK) { toast(`一度に登録できるのは ${MAX_BULK} 件までです（${urls.length} 件あります）`, true); return; }
+      jobs = urls.map((url, i) => ({ url, auto: titleFromUrl(url, src, i) }));
+    }
+    if (!jobs.length) { toast('登録できるファイルがありません：' + skipped.join('、'), true); return; }
+    const multi = jobs.length > 1;
+    jobs.forEach((j, i) => { j.title = (multi ? (base ? `${base} ${i + 1}` : j.auto) : (base || j.auto)).slice(0, 80); });
+    if (multi && !confirm(`${jobs.length} 件をまとめて登録します。よろしいですか？${skipped.length ? `\n（登録できない ${skipped.length} 件はとばします）` : ''}`)) return;
+
+    const btn = $('#atSubmit');
+    const prog = $('#atProgress');
+    const added = [];
+    const failed = [];
+    bulkCancel = false;
+    bulkRunning = true;
+    btn.disabled = true;
+    const oldLabel = btn.textContent;
+    try {
+      for (let i = 0; i < jobs.length; i++) {
+        if (bulkCancel) break;
+        const j = jobs[i];
+        btn.textContent = multi ? `登録中 ${i + 1}/${jobs.length}…` : (src === 'upload' ? 'アップロード中…' : '登録中…');
+        if (multi) { prog.hidden = false; prog.textContent = `${i + 1} / ${jobs.length}：${j.title}`; }
+        const payload = Object.assign({}, common, { title: j.title });
+        try {
+          if (j.file) {
+            payload.source = 'drive';
+            payload.mimeType = j.file.type;
+            payload.fileName = j.file.name;
+            payload.fileBase64 = await blobToBase64(j.file);
+          } else {
+            payload.source = src === 'drivelink' ? 'drive' : src;
+            payload.url = j.url;
+          }
+          const d = await api('track_add', payload);
+          if (d.track) added.push(d.track);
+          if (!multi) toast(d.message);
+        } catch (err) {
+          failed.push(`${j.title}（${err.message}）`);
+          if (!multi) toast(err.message, true);
         }
-        closeModal('modalAddTrack');
-        await loadTracks();
-      } catch (err) { toast(err.message, true); }
-    });
+      }
+    } finally {
+      bulkRunning = false;
+      btn.disabled = false;
+      btn.textContent = oldLabel;
+      prog.hidden = true;
+    }
+    if (!added.length) { if (multi) toast('登録できませんでした：' + failed.slice(0, 3).join('、'), true); return; }
+
+    // ライブラリ・再生リストにも入れる
+    const ids = added.map((t) => t.id);
+    let extra = '';
+    const lib = libById(state.libId);
+    if (lib && addKind === 'song') {
+      try { await saveLibrary(Object.assign({}, lib, { trackIds: lib.trackIds.concat(ids) })); extra = `（ライブラリ「${lib.name}」にも追加）`; } catch (e2) { /* 全曲には登録済み */ }
+    }
+    const pl = curPl();
+    if (pl && addKind === 'podcast' && f.toPodlist.checked && !$('#atToPlWrap').hidden) {
+      const room = Math.max(0, state.plMaxItems - pl.trackIds.length);
+      const put = ids.slice(0, room);
+      if (put.length) {
+        try { await savePodlist(Object.assign({}, pl, { trackIds: pl.trackIds.concat(put) })); extra = `（再生リスト「${pl.name}」に${put.length}話追加）`; } catch (e2) { /* 登録済み */ }
+      }
+      if (put.length < ids.length) extra += `／再生リストが ${state.plMaxItems} 話でいっぱいのため ${ids.length - put.length} 話は入れていません`;
+    }
+    if (multi) {
+      const msg = `${added.length} 件を登録しました${extra}` +
+        (bulkCancel ? '（途中で中止）' : '') +
+        (failed.length ? `／失敗 ${failed.length} 件：${failed.slice(0, 3).join('、')}${failed.length > 3 ? ' ほか' : ''}` : '') +
+        (skipped.length ? `／とばした ${skipped.length} 件` : '');
+      toast(msg, failed.length > 0);
+    } else if (extra) {
+      toast(`「${added[0].title}」を登録しました${extra}`);
+    }
+    if (!bulkCancel) closeModal('modalAddTrack');
+    await loadTracks();
   }
 
   /* =========================================================
@@ -2444,7 +2836,7 @@
   function openModal(id) {
     const m = document.getElementById(id);
     m.hidden = false;
-    const first = m.querySelector('input:not([type=hidden]), select, textarea');
+    const first = m.querySelector('input:not([type=hidden]):not([data-nofocus]), select, textarea');
     if (first) setTimeout(() => first.focus(), 50);
   }
   function closeModal(id) {
@@ -4073,6 +4465,7 @@
     bindDj();
     bindLibrary();
     bindPodcast();
+    bindPodlist();
     bindHelp();
     bindRooms();
     bindStudio();

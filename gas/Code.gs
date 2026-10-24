@@ -5,6 +5,7 @@
  *   v1.2.0 楽曲ライブラリ（1人20セット） / 台本の保存（1人50セット） / 読み上げに指示文を入れない
  *   v1.3.0 番組表（曲No・掛け合いNoの順番で放送）を保存
  *   v1.4.0 ポッドキャストのエピソード並び順（番組ごと・全員共通）と聞く順（1人ずつ）を保存
+ *   v1.5.0 ポッドキャスト再生リスト（1人20セット・1セット100話、番組をまたいで選択・順番指定）
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -17,7 +18,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -36,6 +37,8 @@ const MAX_LIBRARY_TRACKS = 500;                // 1セットの曲数
 const MAX_SCRIPTS = 50;                        // 台本：1人あたりのセット数
 const MAX_SCRIPT_CHARS = 20000;                // 台本1セットの文字数
 const MAX_SHOW_EPISODES = 1000;                // 並び順に入れられるエピソード数
+const MAX_PODLISTS = 20;                       // ポッドキャスト再生リスト：1人あたりのセット数
+const MAX_PODLIST_ITEMS = 100;                 // 1セットのエピソード数
 
 const HEAD = {
   Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
@@ -49,7 +52,8 @@ const HEAD = {
   Scripts:      ['id', 'ownerId', 'title', 'text', 'cast', 'createdAt', 'updatedAt'],
   Programs:     ['ownerId', 'items', 'updatedAt'],
   ShowOrders:   ['showName', 'trackIds', 'updatedBy', 'updatedAt'],
-  ListenOrders: ['ownerId', 'showName', 'mode', 'trackIds', 'updatedAt']
+  ListenOrders: ['ownerId', 'showName', 'mode', 'trackIds', 'updatedAt'],
+  PodLists:     ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt']
 };
 
 /* ============================================================
@@ -183,6 +187,10 @@ const ROUTES = {
   // ポッドキャストの並び順・聞く順
   show_order_save: showOrderSave_,
   listen_order_save: listenOrderSave_,
+  // ポッドキャスト再生リスト
+  podlists_list: podlistsList_,
+  podlist_save: podlistSave_,
+  podlist_delete: podlistDelete_,
   // AI DJ
   dj_talk: djTalk_,
   // パーソナリティ
@@ -468,6 +476,53 @@ function showOrderSave_(req) {
     else append_('ShowOrders', Object.assign({ showName: showName }, patch));
   });
   return { showName: showName, trackIds: r.ids };
+}
+
+/* ---------- ポッドキャスト：再生リスト（1人20セット・1セット100話） ---------- */
+function podlistsList_(req) {
+  const user = auth_(req);
+  const list = readAll_('PodLists').filter(function (r) { return r.ownerId === user.userId; }).map(function (r) {
+    return { id: r.id, name: r.name, trackIds: parseJsonArr_(r.trackIds), createdAt: Number(r.createdAt), updatedAt: Number(r.updatedAt) };
+  });
+  list.sort(function (a, b) { return a.createdAt - b.createdAt; });
+  return { podlists: list, max: MAX_PODLISTS, maxItems: MAX_PODLIST_ITEMS };
+}
+
+function podlistSave_(req) {
+  const user = auth_(req);
+  const d = req.podlist || {};
+  const name = String(d.name || '').trim().slice(0, 30);
+  if (!name) throw apiErr_('再生リストの名前を入力してください');
+  const eps = {};
+  readAll_('Tracks').forEach(function (t) { if (t.kind === 'podcast') eps[t.id] = true; });
+  const raw = (Array.isArray(d.trackIds) ? d.trackIds : []).map(String);
+  if (raw.length > MAX_PODLIST_ITEMS) throw apiErr_('1つの再生リストに入れられるのは' + MAX_PODLIST_ITEMS + '話までです');
+  const ids = raw.filter(function (x, i, a) { return eps[x] && a.indexOf(x) === i; });
+  const t = now_();
+  const out = withLock_(function () {
+    const mine = readAll_('PodLists').filter(function (r) { return r.ownerId === user.userId; });
+    if (d.id) {
+      const row = mine.filter(function (r) { return r.id === d.id; })[0];
+      if (!row) throw apiErr_('再生リストが見つかりません');
+      update_('PodLists', row, { name: name, trackIds: JSON.stringify(ids), updatedAt: t });
+      return { id: row.id, createdAt: Number(row.createdAt) };
+    }
+    if (mine.length >= MAX_PODLISTS) throw apiErr_('再生リストは' + MAX_PODLISTS + 'セットまでです');
+    const rec = { id: 'p_' + randStr_(10), ownerId: user.userId, name: name, trackIds: JSON.stringify(ids), createdAt: t, updatedAt: t };
+    append_('PodLists', rec);
+    return { id: rec.id, createdAt: t };
+  });
+  return { podlist: { id: out.id, name: name, trackIds: ids, createdAt: out.createdAt, updatedAt: t } };
+}
+
+function podlistDelete_(req) {
+  const user = auth_(req);
+  withLock_(function () {
+    const row = readAll_('PodLists').filter(function (r) { return r.id === req.id && r.ownerId === user.userId; })[0];
+    if (!row) throw apiErr_('再生リストが見つかりません');
+    deleteRow_('PodLists', row);
+  });
+  return { message: '再生リストを削除しました（エピソードそのものは消えません）' };
 }
 
 /* ---------- ポッドキャスト：聞く順（1人ずつ・番組ごと） ---------- */
