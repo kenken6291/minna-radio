@@ -6,6 +6,8 @@
  *   v1.3.0 番組表（曲No・掛け合いNoの順番で放送）を保存
  *   v1.4.0 ポッドキャストのエピソード並び順（番組ごと・全員共通）と聞く順（1人ずつ）を保存
  *   v1.5.0 ポッドキャスト再生リスト（1人20セット・1セット100話、番組をまたいで選択・順番指定）
+ *   v1.5.1 Gemini 429 対策：自動リトライ（待ち時間はAPIの指示に従う）／TTSを1件ずつ順番に実行／
+ *          1日の上限と1分あたりの上限を区別して表示／診断用 diagnoseTTS()
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -18,7 +20,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -39,6 +41,10 @@ const MAX_SCRIPT_CHARS = 20000;                // 台本1セットの文字数
 const MAX_SHOW_EPISODES = 1000;                // 並び順に入れられるエピソード数
 const MAX_PODLISTS = 20;                       // ポッドキャスト再生リスト：1人あたりのセット数
 const MAX_PODLIST_ITEMS = 100;                 // 1セットのエピソード数
+const GEMINI_MAX_RETRY = 3;                    // 429・5xx のときの再試行回数
+const GEMINI_MAX_WAIT_SEC = 45;                // 1回の待ち時間の上限（これより長い待ちは諦める）
+const GEMINI_TIME_BUDGET_MS = 4.5 * 60 * 1000; // 実行開始からこの時間を過ぎたら再試行しない（GASの6分制限対策）
+const EXEC_START_MS = Date.now();
 
 const HEAD = {
   Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
@@ -255,6 +261,34 @@ function testMultiTTS() {
     { speaker: '美奈', text: '今夜も素敵な曲を、たっぷりお届けしますね。' }
   ], { '健': 'midnight', '美奈': 'sunset' });
   Logger.log('segments=' + r.length + ' mimeType=' + r[0].mimeType + ' base64長=' + r[0].base64.length);
+}
+
+/**
+ * TTS の診断（エディタから実行）
+ * 単独の声・2人の掛け合いを1回ずつ送り、HTTPコードと Gemini からのエラー内容をそのままログに出します。
+ * 「利用上限」のときは、1分あたり／1日あたりのどちらの上限かと、待ち時間の目安も表示します。
+ */
+function diagnoseTTS() {
+  const model = ttsModel_();
+  Logger.log('TTSモデル: ' + model + ' ／ テキストモデル: ' + textModel_());
+  const tests = [
+    { name: '単独の声', body: ttsBody_('Kore', 'テストです。') },
+    { name: '2人の掛け合い', body: multiTtsBody_('Speaker1: こんばんは。\nSpeaker2: よろしくお願いします。', [
+      { label: 'Speaker1', voice: 'Algenib' }, { label: 'Speaker2', voice: 'Sulafat' }]) }
+  ];
+  tests.forEach(function (t, i) {
+    if (i) Utilities.sleep(2000);
+    const req = geminiRequest_(model, t.body);
+    const url = req.url; delete req.url;
+    const res = UrlFetchApp.fetch(url, req);
+    const code = res.getResponseCode();
+    if (code === 200) { Logger.log('✔ ' + t.name + '：OK'); return; }
+    const info = geminiErrInfo_(res.getContentText());
+    Logger.log('✖ ' + t.name + '：HTTP ' + code + ' ' + info.status + '\n  ' + info.message +
+      (info.quotaIds.length ? '\n  上限の種類: ' + info.quotaIds.join(', ') : '') +
+      (info.retrySec ? '\n  待ち時間の目安: ' + info.retrySec + '秒' : '') +
+      (code === 429 ? '\n  → ' + quotaMessage_(info) : ''));
+  });
 }
 
 /* ============================================================
@@ -789,41 +823,32 @@ function scriptTtsCore_(lines, cast) {
   if (cur.length) segs.push({ lines: cur, names: names });
 
   const model = ttsModel_();
-  const requests = segs.map(function (seg) {
+  const out = [];
+  // 1分あたりの上限にかからないよう、まとめて同時に送らず1件ずつ順番に作る
+  segs.forEach(function (seg) {
     if (seg.names.length === 1) {
       const p = pmap[seg.names[0]];
-      return geminiRequest_(model, ttsBody_(p.voice, seg.lines.map(function (l) { return l.text; }).join('\n')));
+      out.push(audioOf_(callGemini_(model, ttsBody_(p.voice, seg.lines.map(function (l) { return l.text; }).join('\n')))));
+      return;
     }
-    const sp = seg.names.map(function (n, i) { return { label: 'Speaker' + (i + 1), p: pmap[n] }; });
+    const sp = seg.names.map(function (n, i) { return { label: 'Speaker' + (i + 1), voice: pmap[n].voice }; });
     // 指示文は入れず、セリフだけを渡す（指示文が読み上げられてしまうのを防ぐ）
     const script = seg.lines.map(function (l) { return sp[seg.names.indexOf(l.speaker)].label + ': ' + l.text; }).join('\n');
-    return geminiRequest_(model, {
-      contents: [{ parts: [{ text: script }] }],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          multiSpeakerVoiceConfig: {
-            speakerVoiceConfigs: sp.map(function (s) {
-              return { speaker: s.label, voiceConfig: { prebuiltVoiceConfig: { voiceName: s.p.voice } } };
-            })
-          }
-        }
-      }
-    });
-  });
-  const results = UrlFetchApp.fetchAll(requests);
-  const out = [];
-  results.forEach(function (res, i) {
     try {
-      out.push(audioOf_(parseGemini_(res)));
+      out.push(audioOf_(callGemini_(model, multiTtsBody_(script, sp))));
     } catch (e) {
+      const why = String((e && e.message) || e);
+      if (/利用上限/.test(why)) throw e;   // 上限なら作り直しても同じなので、そのまま知らせる
       // 複数話者で失敗したときは、1行ずつ単独の声で作り直す
-      if (segs[i].names.length < 2 || /利用上限/.test(String(e.message))) throw e;
-      const singles = UrlFetchApp.fetchAll(segs[i].lines.map(function (l) {
-        const p = pmap[l.speaker];
-        return geminiRequest_(model, ttsBody_(p.voice, l.text));
-      }));
-      singles.forEach(function (r) { out.push(audioOf_(parseGemini_(r))); });
+      console.warn('複数話者TTSに失敗したため1行ずつ作り直します: ' + why);
+      seg.lines.forEach(function (l) {
+        try {
+          out.push(audioOf_(callGemini_(model, ttsBody_(pmap[l.speaker].voice, l.text))));
+        } catch (e2) {
+          const why2 = String((e2 && e2.message) || e2);
+          throw apiErr_(why2 + '（最初の掛け合い生成の失敗理由: ' + why.slice(0, 160) + '）');
+        }
+      });
     }
   });
   return out;
@@ -1045,6 +1070,22 @@ function textOf_(res) {
 function cleanText_(t) { return String(t || '').replace(/[*#`]/g, '').trim(); }
 
 /** 読み上げ本文だけを渡す（「〜として〜読み上げてください」などの指示文は付けない） */
+function multiTtsBody_(script, speakers) {
+  return {
+    contents: [{ parts: [{ text: script }] }],
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      speechConfig: {
+        multiSpeakerVoiceConfig: {
+          speakerVoiceConfigs: speakers.map(function (s) {
+            return { speaker: s.label, voiceConfig: { prebuiltVoiceConfig: { voiceName: s.voice } } };
+          })
+        }
+      }
+    }
+  };
+}
+
 function ttsBody_(voice, text) {
   return {
     contents: [{ parts: [{ text: text }] }],
@@ -1082,21 +1123,83 @@ function geminiRequest_(model, body) {
   };
 }
 
+/** Gemini のエラー本文から、理由・上限の種類・待ち時間を取り出す */
+function geminiErrInfo_(txt) {
+  const info = { status: '', message: String(txt || '').slice(0, 300), quotaIds: [], retrySec: 0 };
+  try {
+    const e = (JSON.parse(txt) || {}).error || {};
+    info.status = e.status || '';
+    info.message = String(e.message || info.message).slice(0, 300);
+    (e.details || []).forEach(function (d) {
+      const type = String(d['@type'] || '');
+      if (/RetryInfo/.test(type) && d.retryDelay) info.retrySec = Math.ceil(parseFloat(String(d.retryDelay)) || 0);
+      if (/QuotaFailure/.test(type)) {
+        (d.violations || []).forEach(function (v) { if (v.quotaId) info.quotaIds.push(String(v.quotaId)); });
+      }
+    });
+  } catch (err) { /* JSON でない応答 */ }
+  if (!info.retrySec) {
+    const m = info.message.match(/retry in ([\d.]+)\s*s/i);
+    if (m) info.retrySec = Math.ceil(parseFloat(m[1]));
+  }
+  return info;
+}
+
+/** 1日あたりの上限か（1分あたりなら false） */
+function isDailyQuota_(info) {
+  if (info.quotaIds.some(function (q) { return /PerDay/i.test(q); })) return true;
+  if (info.quotaIds.some(function (q) { return /PerMinute/i.test(q); })) return false;
+  return /per day|daily/i.test(info.message);
+}
+
+function quotaMessage_(info) {
+  if (isDailyQuota_(info)) {
+    return 'Gemini API の「1日あたり」の利用上限に達しました。上限は太平洋時間の0時（日本時間の16〜17時ごろ）にリセットされます。' +
+      'すぐ使いたい場合は、Google AI Studio で課金（有料枠）を有効にするか、スクリプトプロパティの GEMINI_TTS_MODEL を別のモデルに変えてください';
+  }
+  return 'Gemini API の「1分あたり」の利用上限に達しました。' + (info.retrySec ? '約' + info.retrySec + '秒' : '1分ほど') + '待ってから再度お試しください';
+}
+
 function parseGemini_(res) {
   const code = res.getResponseCode();
   const txt = res.getContentText();
   if (code !== 200) {
-    if (code === 429) throw apiErr_('Gemini API の利用上限に達しました。しばらく待ってから再度お試しください');
-    throw apiErr_('Gemini API エラー(' + code + '): ' + txt.slice(0, 200));
+    const info = geminiErrInfo_(txt);
+    console.warn('Gemini API HTTP ' + code + ' ' + info.status + ' ' + info.message + (info.quotaIds.length ? ' [' + info.quotaIds.join(', ') + ']' : ''));
+    if (code === 429) throw apiErr_(quotaMessage_(info));
+    throw apiErr_('Gemini API エラー(' + code + '): ' + info.message.slice(0, 200));
   }
   return JSON.parse(txt);
 }
 
+/**
+ * Gemini を呼ぶ（429・5xx のときは自動で待って再試行）
+ * 待ち時間は API が返す retryDelay に従い、なければ 4秒→8秒→16秒。
+ * 1日の上限・待ち時間が長すぎる・実行時間が残り少ないときは再試行しない。
+ */
+function callGemini_(model, body) {
+  const req = geminiRequest_(model, body);
+  const url = req.url;
+  delete req.url;
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = UrlFetchApp.fetch(url, req);
+    const code = res.getResponseCode();
+    const retryable = code === 429 || code === 500 || code === 503 || code === 504;
+    if (code === 200 || !retryable || attempt >= GEMINI_MAX_RETRY) break;
+    const info = geminiErrInfo_(res.getContentText());
+    if (code === 429 && isDailyQuota_(info)) break;
+    const waitSec = Math.max(info.retrySec || 0, 4 * Math.pow(2, attempt)) + Math.random();
+    if (waitSec > GEMINI_MAX_WAIT_SEC) break;
+    if (Date.now() - EXEC_START_MS + waitSec * 1000 > GEMINI_TIME_BUDGET_MS) break;
+    console.warn('Gemini API HTTP ' + code + '。' + Math.round(waitSec) + '秒待って再試行します（' + (attempt + 1) + '/' + GEMINI_MAX_RETRY + '）');
+    Utilities.sleep(Math.round(waitSec * 1000));
+  }
+  return parseGemini_(res);
+}
+
 function gemini_(model, body) {
-  const r = geminiRequest_(model, body);
-  const url = r.url;
-  delete r.url;
-  return parseGemini_(UrlFetchApp.fetch(url, r));
+  return callGemini_(model, body);
 }
 
 /** PCM(16bit/mono) を WAV に包んで Blob 化 */
