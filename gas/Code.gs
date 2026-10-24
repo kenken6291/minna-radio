@@ -8,11 +8,17 @@
  *   v1.5.0 ポッドキャスト再生リスト（1人20セット・1セット100話、番組をまたいで選択・順番指定）
  *   v1.5.1 Gemini 429 対策：自動リトライ（待ち時間はAPIの指示に従う）／TTSを1件ずつ順番に実行／
  *          1日の上限と1分あたりの上限を区別して表示／診断用 diagnoseTTS()
+ *   v1.5.2 Gemini 3.8 TTS の新形式に対応（掛け合いは1セリフ＝1パートで speech_metadata.speaker を指定）
+ *          パーソナリティの「話し方」を speech_metadata.style として渡す（読み上げられない）
+ *          1日の上限に達したら予備のTTSモデル（GEMINI_TTS_FALLBACK_MODELS）へ自動で切り替え
+ *   v1.6.0 曲・エピソードの編集（タイトル・番組名・説明・アーティスト、音声の差し替え）
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
  *   GEMINI_TEXT_MODEL   : 台本生成モデルID（例: gemini-3.8-flash）
  *   GEMINI_TTS_MODEL    : 音声合成モデルID（例: gemini-3.8-flash-tts）
+ *   GEMINI_TTS_FALLBACK_MODELS : 任意。1日の上限に達したときに使う予備のTTSモデル（カンマ区切り。例: gemini-3.8-flash-lite-tts）
+ *   TTS_USE_STYLE       : 任意。"false" でパーソナリティの話し方（style）をTTSに渡さない
  *   PEPPER              : パスワードハッシュ用の秘密文字列（必須・長めのランダム文字列）
  *   ADMIN_EMAILS        : 管理者メール（カンマ区切り、任意。未設定なら最初の登録者が管理者）
  *   SPREADSHEET_ID      : 任意。未設定ならコンテナバインドのスプレッドシートを使用
@@ -20,7 +26,7 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -189,6 +195,7 @@ const ROUTES = {
   tracks_list: tracksList_,
   track_add: trackAdd_,
   track_delete: trackDelete_,
+  track_update: trackUpdate_,
   audio_get: audioGet_,
   // ポッドキャストの並び順・聞く順
   show_order_save: showOrderSave_,
@@ -269,22 +276,28 @@ function testMultiTTS() {
  * 「利用上限」のときは、1分あたり／1日あたりのどちらの上限かと、待ち時間の目安も表示します。
  */
 function diagnoseTTS() {
-  const model = ttsModel_();
-  Logger.log('TTSモデル: ' + model + ' ／ テキストモデル: ' + textModel_());
-  const tests = [
-    { name: '単独の声', body: ttsBody_('Kore', 'テストです。') },
-    { name: '2人の掛け合い', body: multiTtsBody_('Speaker1: こんばんは。\nSpeaker2: よろしくお願いします。', [
-      { label: 'Speaker1', voice: 'Algenib' }, { label: 'Speaker2', voice: 'Sulafat' }]) }
+  const models = ttsModels_();
+  Logger.log('TTSモデル: ' + models.join(' → ') + ' ／ テキストモデル: ' + textModel_());
+  const sp = [{ label: 'Speaker1', voice: 'Algenib' }, { label: 'Speaker2', voice: 'Sulafat' }];
+  const turns = [
+    { label: 'Speaker1', text: 'こんばんは。', style: '低めで落ち着いたトーン' },
+    { label: 'Speaker2', text: 'よろしくお願いします。', style: '温かく、笑顔が伝わるように' }
   ];
+  const tests = [];
+  models.forEach(function (m, i) {
+    tests.push({ model: m, name: '単独の声', body: ttsSingleBody_(m, 'Kore', 'テストです。', '明るく') });
+    if (i === 0) tests.push({ model: m, name: '2人の掛け合い', body: ttsMultiBody_(m, turns, sp) });
+  });
   tests.forEach(function (t, i) {
     if (i) Utilities.sleep(2000);
-    const req = geminiRequest_(model, t.body);
+    const req = geminiRequest_(t.model, t.body);
     const url = req.url; delete req.url;
     const res = UrlFetchApp.fetch(url, req);
     const code = res.getResponseCode();
-    if (code === 200) { Logger.log('✔ ' + t.name + '：OK'); return; }
+    const fmt = usesSpeechMetadata_(t.model) ? '新形式(speech_metadata)' : '旧形式';
+    if (code === 200) { Logger.log('✔ ' + t.model + '／' + t.name + '：OK（' + fmt + '）'); return; }
     const info = geminiErrInfo_(res.getContentText());
-    Logger.log('✖ ' + t.name + '：HTTP ' + code + ' ' + info.status + '\n  ' + info.message +
+    Logger.log('✖ ' + t.model + '／' + t.name + '（' + fmt + '）：HTTP ' + code + ' ' + info.status + '\n  ' + info.message +
       (info.quotaIds.length ? '\n  上限の種類: ' + info.quotaIds.join(', ') : '') +
       (info.retrySec ? '\n  待ち時間の目安: ' + info.retrySec + '秒' : '') +
       (code === 429 ? '\n  → ' + quotaMessage_(info) : ''));
@@ -592,6 +605,16 @@ function trackAdd_(req) {
     ownerId: user.userId, ownerName: user.nickname, createdAt: now_()
   };
 
+  applySource_(rec, req, source, title);
+
+  withLock_(function () { append_('Tracks', rec); });
+  return { track: publicTrack_(rec), message: '「' + title + '」を登録しました' };
+}
+
+/** 登録元（YouTube / 外部URL / Drive）を rec に書き込む。登録と差し替えで共通 */
+function applySource_(rec, req, source, title) {
+  rec.source = source;
+  rec.url = ''; rec.fileId = ''; rec.youtubeId = ''; rec.mimeType = '';
   if (source === 'youtube') {
     const id = youtubeId_(req.url);
     if (!id) throw apiErr_('YouTube の URL から動画IDを読み取れませんでした');
@@ -622,9 +645,46 @@ function trackAdd_(req) {
   } else {
     throw apiErr_('登録元の種類が不正です');
   }
+}
 
-  withLock_(function () { append_('Tracks', rec); });
-  return { track: publicTrack_(rec), message: '「' + title + '」を登録しました' };
+/** 曲・エピソードの編集（登録者か管理者）。source を送ったときだけ音声を差し替える */
+function trackUpdate_(req) {
+  const user = auth_(req);
+  const d = req.track || {};
+  const title = String(d.title || '').trim().slice(0, 80);
+  if (!title) throw apiErr_('タイトルを入力してください');
+  const pre = readAll_('Tracks').filter(function (r) { return r.id === d.id; })[0];
+  if (!pre) throw apiErr_('見つかりません');
+  if (pre.ownerId !== user.userId && user.role !== 'admin') throw apiErr_('編集できるのは登録者か管理者だけです');
+  // アップロードは時間がかかるので、ロックの外で先に Drive に保存しておく
+  let newRec = null;
+  if (d.source) {
+    newRec = {};
+    applySource_(newRec, d, String(d.source), title);
+  }
+  return withLock_(function () {
+    const t = readAll_('Tracks').filter(function (r) { return r.id === d.id; })[0];
+    if (!t) throw apiErr_('見つかりません');
+    if (t.ownerId !== user.userId && user.role !== 'admin') throw apiErr_('編集できるのは登録者か管理者だけです');
+    const patch = {
+      title: title,
+      description: String(d.description || '').trim().slice(0, 500)
+    };
+    if (t.kind === 'podcast') patch.showName = String(d.showName || '').trim().slice(0, 60);
+    else {
+      patch.artist = String(d.artist || '').trim().slice(0, 60);
+      patch.aiGenerated = d.aiGenerated ? 'true' : 'false';
+    }
+    if (newRec) {
+      // 以前アプリで保存したファイルは、差し替えたらゴミ箱へ
+      if (t.source === 'drive' && t.fileId && t.fileId !== newRec.fileId && inAppFolder_(t.fileId)) {
+        try { DriveApp.getFileById(t.fileId).setTrashed(true); } catch (e) { /* 既に無い */ }
+      }
+      ['source', 'url', 'fileId', 'youtubeId', 'mimeType'].forEach(function (k) { patch[k] = newRec[k]; });
+    }
+    update_('Tracks', t, patch);
+    return { track: publicTrack_(t), message: '「' + title + '」を更新しました' };
+  });
 }
 
 function trackDelete_(req) {
@@ -822,31 +882,34 @@ function scriptTtsCore_(lines, cast) {
   });
   if (cur.length) segs.push({ lines: cur, names: names });
 
-  const model = ttsModel_();
   const out = [];
   // 1分あたりの上限にかからないよう、まとめて同時に送らず1件ずつ順番に作る
   segs.forEach(function (seg) {
     if (seg.names.length === 1) {
       const p = pmap[seg.names[0]];
-      out.push(audioOf_(callGemini_(model, ttsBody_(p.voice, seg.lines.map(function (l) { return l.text; }).join('\n')))));
+      const text = seg.lines.map(function (l) { return l.text; }).join('\n');
+      out.push(runTts_(function (m) { return ttsSingleBody_(m, p.voice, text, p.style); }));
       return;
     }
     const sp = seg.names.map(function (n, i) { return { label: 'Speaker' + (i + 1), voice: pmap[n].voice }; });
-    // 指示文は入れず、セリフだけを渡す（指示文が読み上げられてしまうのを防ぐ）
-    const script = seg.lines.map(function (l) { return sp[seg.names.indexOf(l.speaker)].label + ': ' + l.text; }).join('\n');
+    // セリフだけを渡す（指示文は入れない）。話し方は speech_metadata.style で別に渡す
+    const turns = seg.lines.map(function (l) {
+      return { label: sp[seg.names.indexOf(l.speaker)].label, text: l.text, style: pmap[l.speaker].style };
+    });
     try {
-      out.push(audioOf_(callGemini_(model, multiTtsBody_(script, sp))));
+      out.push(runTts_(function (m) { return ttsMultiBody_(m, turns, sp); }));
     } catch (e) {
       const why = String((e && e.message) || e);
-      if (/利用上限/.test(why)) throw e;   // 上限なら作り直しても同じなので、そのまま知らせる
+      if (/^QUOTA/.test(e.code || '') || /利用上限/.test(why)) throw e;   // 上限なら作り直しても同じ
       // 複数話者で失敗したときは、1行ずつ単独の声で作り直す
       console.warn('複数話者TTSに失敗したため1行ずつ作り直します: ' + why);
       seg.lines.forEach(function (l) {
+        const p = pmap[l.speaker];
         try {
-          out.push(audioOf_(callGemini_(model, ttsBody_(pmap[l.speaker].voice, l.text))));
+          out.push(runTts_(function (m) { return ttsSingleBody_(m, p.voice, l.text, p.style); }));
         } catch (e2) {
           const why2 = String((e2 && e2.message) || e2);
-          throw apiErr_(why2 + '（最初の掛け合い生成の失敗理由: ' + why.slice(0, 160) + '）');
+          throw apiErr_(why2 + '（最初の掛け合い生成の失敗理由: ' + why.slice(0, 160) + '）', e2.code);
         }
       });
     }
@@ -1069,10 +1132,57 @@ function textOf_(res) {
 
 function cleanText_(t) { return String(t || '').replace(/[*#`]/g, '').trim(); }
 
-/** 読み上げ本文だけを渡す（「〜として〜読み上げてください」などの指示文は付けない） */
-function multiTtsBody_(script, speakers) {
+/* ---------- TTS ----------
+ * Gemini 3.8 TTS（新形式）：本文は parts[].text にそのまま（読み上げ原稿として扱われる）、
+ *   話し方は parts[].speechMetadata.style、掛け合いは1セリフ＝1パートで speechMetadata.speaker を必ず指定。
+ * 旧モデル（2.5 / 3.1 preview など）：掛け合いは「Speaker1: 〜」の台本を1つのテキストで渡す。
+ * 形式違いの 400 が返ったら自動で形式を切り替えて覚えておく（6時間）。
+ */
+function ttsModels_() {
+  const list = [ttsModel_()].concat(String(prop_('GEMINI_TTS_FALLBACK_MODELS') || '').split(','));
+  return list.map(function (x) { return String(x).trim(); })
+    .filter(function (x, i, a) { return x && a.indexOf(x) === i; });
+}
+
+function usesSpeechMetadata_(model) {
+  const c = CacheService.getScriptCache().get('ttsfmt_' + model);
+  if (c) return c === 'meta';
+  return !/gemini-2\.|tts-preview/i.test(model);
+}
+
+function setTtsFormat_(model, meta) {
+  CacheService.getScriptCache().put('ttsfmt_' + model, meta ? 'meta' : 'legacy', 6 * 60 * 60);
+}
+
+const useStyle_ = function () { return String(prop_('TTS_USE_STYLE') || '').toLowerCase() !== 'false'; };
+
+function ttsSingleBody_(model, voice, text, style) {
+  const part = { text: String(text) };
+  if (usesSpeechMetadata_(model) && style && useStyle_()) part.speechMetadata = { style: String(style).slice(0, 200) };
   return {
-    contents: [{ parts: [{ text: script }] }],
+    contents: [{ parts: [part] }],
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } }
+    }
+  };
+}
+
+/** turns: [{ label, text, style }]、speakers: [{ label, voice }]（2人まで） */
+function ttsMultiBody_(model, turns, speakers) {
+  let parts;
+  if (usesSpeechMetadata_(model)) {
+    const withStyle = useStyle_();
+    parts = turns.map(function (t) {
+      const meta = { speaker: t.label };
+      if (withStyle && t.style) meta.style = String(t.style).slice(0, 200);
+      return { text: String(t.text), speechMetadata: meta };
+    });
+  } else {
+    parts = [{ text: turns.map(function (t) { return t.label + ': ' + t.text; }).join('\n') }];
+  }
+  return {
+    contents: [{ parts: parts }],
     generationConfig: {
       responseModalities: ['AUDIO'],
       speechConfig: {
@@ -1086,22 +1196,45 @@ function multiTtsBody_(script, speakers) {
   };
 }
 
-function ttsBody_(voice, text) {
-  return {
-    contents: [{ parts: [{ text: text }] }],
-    generationConfig: {
-      responseModalities: ['AUDIO'],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } }
+/**
+ * TTS を実行して音声を返す。build(model) で本文を作る。
+ * ・形式違いの 400 → 形式を切り替えて同じモデルでもう1回
+ * ・1日の上限 → 予備モデル（GEMINI_TTS_FALLBACK_MODELS）へ
+ */
+function runTts_(build) {
+  const cache = CacheService.getScriptCache();
+  const all = ttsModels_();
+  // 1日の上限に達したモデルは1時間ほど後回しにする（ムダな送信を減らす）
+  const fresh = all.filter(function (m) { return !cache.get('ttsday_' + m); });
+  const models = fresh.length ? fresh : all;
+  let lastErr = null;
+  for (let i = 0; i < models.length; i++) {
+    const m = models[i];
+    let err = null;
+    try { return audioOf_(callGemini_(m, build(m))); } catch (e) { err = e; }
+    if (err.code === 'TTS_FORMAT') {
+      const was = usesSpeechMetadata_(m);
+      setTtsFormat_(m, !was);
+      console.warn(m + '：TTSの形式を' + (was ? '旧形式' : '新形式') + 'に切り替えて再試行します');
+      try { return audioOf_(callGemini_(m, build(m))); } catch (e) { err = e; if (e.code === 'TTS_FORMAT') setTtsFormat_(m, was); }
     }
-  };
+    if (err.code === 'QUOTA_DAY') cache.put('ttsday_' + m, '1', 60 * 60);
+    if (err.code === 'QUOTA_DAY' && i < models.length - 1) {
+      console.warn(m + ' は1日の上限に達したため ' + models[i + 1] + ' に切り替えます');
+      lastErr = err;
+      continue;
+    }
+    throw err;
+  }
+  throw lastErr || apiErr_('音声を作れませんでした');
 }
 
 function tts_(p, text) {
-  return ttsVoice_(p.voice, text);
+  return ttsVoice_(p.voice, text, p.style);
 }
 
-function ttsVoice_(voice, text) {
-  return audioOf_(gemini_(ttsModel_(), ttsBody_(voice, text)));
+function ttsVoice_(voice, text, style) {
+  return runTts_(function (m) { return ttsSingleBody_(m, voice, text, style); });
 }
 
 function audioOf_(res) {
@@ -1155,7 +1288,7 @@ function isDailyQuota_(info) {
 function quotaMessage_(info) {
   if (isDailyQuota_(info)) {
     return 'Gemini API の「1日あたり」の利用上限に達しました。上限は太平洋時間の0時（日本時間の16〜17時ごろ）にリセットされます。' +
-      'すぐ使いたい場合は、Google AI Studio で課金（有料枠）を有効にするか、スクリプトプロパティの GEMINI_TTS_MODEL を別のモデルに変えてください';
+      'すぐ使いたい場合は、Google AI Studio で課金（有料枠）を有効にするか、スクリプトプロパティ GEMINI_TTS_FALLBACK_MODELS に予備のTTSモデル（例: gemini-3.8-flash-lite-tts）を設定してください（上限はモデルごとです）';
   }
   return 'Gemini API の「1分あたり」の利用上限に達しました。' + (info.retrySec ? '約' + info.retrySec + '秒' : '1分ほど') + '待ってから再度お試しください';
 }
@@ -1166,8 +1299,9 @@ function parseGemini_(res) {
   if (code !== 200) {
     const info = geminiErrInfo_(txt);
     console.warn('Gemini API HTTP ' + code + ' ' + info.status + ' ' + info.message + (info.quotaIds.length ? ' [' + info.quotaIds.join(', ') + ']' : ''));
-    if (code === 429) throw apiErr_(quotaMessage_(info));
-    throw apiErr_('Gemini API エラー(' + code + '): ' + info.message.slice(0, 200));
+    if (code === 429) throw apiErr_(quotaMessage_(info), isDailyQuota_(info) ? 'QUOTA_DAY' : 'QUOTA_MIN');
+    const fmtErr = code === 400 && /speech_?metadata|Unknown name|multi-?speaker/i.test(info.message);
+    throw apiErr_('Gemini API エラー(' + code + '): ' + info.message.slice(0, 200), fmtErr ? 'TTS_FORMAT' : '');
   }
   return JSON.parse(txt);
 }

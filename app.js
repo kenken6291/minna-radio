@@ -1,5 +1,5 @@
 /**
- * NEON WAVE RADIO - app.js  v1.5.0
+ * NEON WAVE RADIO - app.js  v1.6.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
@@ -7,6 +7,7 @@
  * v1.3.1：ライブラリ内の曲の並べ替え（一番上・1つ上・1つ下・一番下・番号を指定）
  * v1.4.0：使い方ガイド / ポッドキャストのエピソード並べ替え（全員共通）/ 聞く順の設定（自分用）
  * v1.5.0：ポッドキャスト再生リスト（20セット×100話・選択と順番指定）/ まとめて登録（最大100件）
+ * v1.6.0：曲・エピソードの編集（タイトル・番組名・説明・アーティスト／音声の差し替え）
  */
 'use strict';
 (() => {
@@ -1374,7 +1375,8 @@
           ${t.kind === 'song' ? `<button class="icon-btn" data-libpick=""${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
           ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
-          ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
+          ${canDelete(t) ? `<button class="icon-btn" data-edit="${esc(t.id)}" title="編集" aria-label="編集">✎</button>` : ''}
+          ${canDelete(t) ? `<button class="icon-btn" data-del=""${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
         </div>`}
       </li>`;
   }
@@ -2245,6 +2247,8 @@
       }
       const nx = e.target.closest('[data-next]');
       if (nx) { unlockMedia(); addNext(nx.dataset.next); return; }
+      const ed = e.target.closest('[data-edit]');
+      if (ed) { openEditTrack(ed.dataset.edit); return; }
       const del = e.target.closest('[data-del]');
       if (del) { deleteTrack(del.dataset.del); return; }
       const ex = e.target.closest('[data-export]');
@@ -2428,6 +2432,110 @@
     }
     if (!bulkCancel) closeModal('modalAddTrack');
     await loadTracks();
+  }
+
+  /* =========================================================
+   *  曲・エピソードの編集
+   * ========================================================= */
+  function sourceLabel(t) {
+    if (t.source === 'youtube') return '📺 YouTube（' + t.url + '）';
+    if (t.source === 'url') return '🌐 外部URL（' + t.url + '）';
+    return '📁 Google Drive のファイル';
+  }
+
+  function openEditTrack(id) {
+    const t = state.tracks.find((x) => x.id === id);
+    if (!t) return;
+    const f = $('#editTrackForm');
+    f.reset();
+    f.dataset.id = id;
+    $('#etTitle').textContent = t.kind === 'podcast' ? 'エピソードを編集' : '曲を編集';
+    $$('[data-et-kind]').forEach((el) => (el.hidden = el.dataset.etKind !== t.kind));
+    f.title.value = t.title || '';
+    f.showName.value = t.showName || '';
+    f.artist.value = t.artist || '';
+    f.description.value = t.description || '';
+    f.aiGenerated.checked = !!t.aiGenerated;
+    const shows = [...new Set(state.tracks.filter((x) => x.kind === 'podcast' && x.showName).map((x) => x.showName))];
+    $('#etShowList').innerHTML = shows.map((n) => `<option value="${esc(n)}"></option>`).join('');
+    $('#etAudioNow').textContent = sourceLabel(t);
+    updateEditSource();
+    openModal('modalEditTrack');
+  }
+
+  function updateEditSource() {
+    const src = $('#etSource').value;
+    $('[data-et-src="upload"]').hidden = src !== 'upload';
+    $('[data-et-src="link"]').hidden = !src || src === 'upload';
+    $('#etReplaceNote').hidden = !src;
+    $('#etUrlLabel').textContent = {
+      youtube: 'YouTube の URL',
+      drivelink: 'Google Drive の共有リンク',
+      url: '音声ファイルの URL（https://〜.mp3 など）'
+    }[src] || 'URL';
+  }
+
+  async function submitEditTrack(e) {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.id;
+    const old = state.tracks.find((x) => x.id === id);
+    if (!old) return;
+    const src = f.source.value;
+    const track = {
+      id,
+      title: f.title.value.trim(),
+      showName: f.showName.value.trim(),
+      artist: f.artist.value.trim(),
+      description: f.description.value.trim(),
+      aiGenerated: f.aiGenerated.checked
+    };
+    if (!track.title) { toast('タイトルを入力してください', true); return; }
+    let file = null;
+    if (src === 'upload') {
+      file = f.file.files[0];
+      if (!file) { toast('差し替える音声ファイルを選んでください', true); return; }
+      if (!file.type.startsWith('audio/')) { toast('音声ファイルを選んでください', true); return; }
+      if (file.size > CONFIG.MAX_UPLOAD_MB * 1024 * 1024) { toast(`ファイルが大きすぎます（${CONFIG.MAX_UPLOAD_MB}MBまで）`, true); return; }
+      track.source = 'drive';
+      track.mimeType = file.type;
+      track.fileName = file.name;
+    } else if (src) {
+      const url = f.url.value.trim();
+      if (!url) { toast('URL を入力してください', true); return; }
+      track.source = src === 'drivelink' ? 'drive' : src;
+      track.url = url;
+    }
+    await withBusy($('#etSubmit'), file ? 'アップロード中…' : '保存中…', async () => {
+      try {
+        if (file) track.fileBase64 = await blobToBase64(file);
+        const d = await api('track_update', { track });
+        const nt = d.track;
+        // 画面の情報をすぐ入れ替える（再生中・プレイリストの表示も）
+        const i = state.tracks.findIndex((x) => x.id === id);
+        if (i >= 0) state.tracks[i] = nt;
+        state.queue = state.queue.map((x) => (x.id === id ? nt : x));
+        const showChanged = old.kind === 'podcast' && (old.showName || '') !== (nt.showName || '');
+        closeModal('modalEditTrack');
+        renderSongs();
+        renderPodcasts();
+        renderQueue();
+        const cur = state.queue[state.idx];
+        if (cur && cur.id === id) {
+          renderNowPlaying(nt);
+          if (src) toast(`${d.message}（再生中の音声は、次に再生したときから新しくなります）`);
+          else toast(d.message);
+        } else {
+          toast(d.message + (showChanged ? `（番組「${nt.showName || '番組名なし'}」に移しました）` : ''));
+        }
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
+  function bindEditTrack() {
+    $$('.et-max-mb').forEach((el) => (el.textContent = CONFIG.MAX_UPLOAD_MB));
+    $('#etSource').addEventListener('change', updateEditSource);
+    $('#editTrackForm').addEventListener('submit', submitEditTrack);
   }
 
   /* =========================================================
@@ -4466,6 +4574,7 @@
     bindLibrary();
     bindPodcast();
     bindPodlist();
+    bindEditTrack();
     bindHelp();
     bindRooms();
     bindStudio();

@@ -1,5 +1,5 @@
 /* =========================================================
-   NEON WAVE RADIO - style.css  v1.5.0
+   NEON WAVE RADIO - style.css  v1.6.0
    ========================================================= */
 :root {
   --ink: #0d0a1f;          /* 夜空 */
@@ -971,4 +971,17 @@ input[type="range"] { accent-color: var(--magenta); }
   .ple-move { grid-column: 1 / -1; justify-content: flex-end; }
   .ple-move .icon-btn { min-width: 40px; min-height: 32px; }
   .ple-row-title { white-space: normal; }
+}
+
+/* =========================================================
+   v1.6.0 追加：曲・エピソードの編集
+   ========================================================= */
+.et-audio { margin-top: 14px; padding: 12px; border-radius: 12px; background: rgba(0, 0, 0, .22); box-shadow: 0 0 0 1px var(--line) inset; }
+.et-audio .field:last-of-type { margin-bottom: 0; }
+.et-audio-now { margin: 0 0 10px; font-size: .85rem; color: var(--muted); word-break: break-all; }
+.et-audio-label { display: inline-block; margin-right: .6em; padding: 0 .5em; border-radius: 5px; background: rgba(63, 230, 255, .12); color: var(--cyan); font-weight: 700; }
+#editTrackForm .field .hint { display: block; margin-top: 4px; font-size: .75rem; color: var(--muted); }
+#etReplaceNote { margin: 8px 0 0; font-size: .78rem; color: var(--tube); }
+@media (max-width: 680px) {
+  .track-actions .icon-btn { padding: .3em .35em; }
 }

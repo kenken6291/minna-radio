@@ -527,6 +527,45 @@
   </div>
 </div>
 
+<!-- ===================== 曲・エピソードの編集 ===================== -->
+<div class="modal" id="modalEditTrack" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="etTitle">
+    <h3 id="etTitle">エピソードを編集</h3>
+    <form id="editTrackForm">
+      <label class="field"><span>タイトル</span><input type="text" name="title" maxlength="80" required></label>
+      <label class="field" data-et-kind="podcast"><span>番組名</span>
+        <input type="text" name="showName" maxlength="60" list="etShowList" autocomplete="off">
+        <small class="hint">番組名を変えると、その番組の一番下に移ります。</small></label>
+      <datalist id="etShowList"></datalist>
+      <label class="field" data-et-kind="song"><span>アーティスト</span><input type="text" name="artist" maxlength="60"></label>
+      <label class="field"><span>説明（任意）</span><textarea name="description" rows="3" maxlength="500"></textarea></label>
+      <label class="switch" data-et-kind="song"><input type="checkbox" name="aiGenerated"><span class="switch-ui"></span><span>AIで生成したオリジナル曲</span></label>
+
+      <div class="et-audio">
+        <p class="et-audio-now"><span class="et-audio-label">いまの音声</span><span id="etAudioNow"></span></p>
+        <label class="field"><span>音声の差し替え</span>
+          <select name="source" id="etSource">
+            <option value="">差し替えない</option>
+            <option value="upload">音声ファイルをアップロード</option>
+            <option value="youtube">YouTube の URL</option>
+            <option value="drivelink">Google Drive の共有リンク</option>
+            <option value="url">外部の音声ファイル URL</option>
+          </select></label>
+        <label class="field" data-et-src="upload" hidden><span>音声ファイル（<span class="et-max-mb"></span>MBまで）</span>
+          <input type="file" name="file" accept="audio/*"></label>
+        <label class="field" data-et-src="link" hidden><span id="etUrlLabel">URL</span>
+          <input type="url" name="url" placeholder="https://"></label>
+        <p class="hint" id="etReplaceNote" hidden>保存すると音声が入れ替わります。アプリにアップロードした前のファイルはゴミ箱に移ります。</p>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
+        <button type="submit" class="btn btn-primary" id="etSubmit">保存する</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div class="modal" id="modalCreateRoom" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="crTitle">
     <h3 id="crTitle">ルームを開く</h3>
@@ -684,7 +723,7 @@
           <li>▶ / ⏸ で再生と一時停止、⏮ ⏭ で前後の曲へ移ります。</li>
           <li>🔀 でシャッフル、🔁 でリピート（オフ／全部／1曲）を切り替えます。</li>
           <li>☰ を押すと、再生中の一覧（プレイリスト）で次に流れる曲を確かめられます。</li>
-          <li>各曲の <b>＋</b> は「次に再生」、<b>⬇</b> は音声ファイルに書き出し（MP3 / WAV など）、<b>🗑</b> は削除（登録した人と管理者だけ）です。</li>
+          <li>各曲の <b>＋</b> は「次に再生」、<b>✎</b> は編集（タイトルなどの修正・音声の差し替え）、<b>⬇</b> は音声ファイルに書き出し（MP3 / WAV など）、<b>🗑</b> は削除（登録した人と管理者だけ）です。</li>
         </ul>
         <h4>設定</h4>
         <ul>
@@ -738,6 +777,7 @@
           <li><b>この順番で保存</b> → <b>▶ 再生</b> で、上から順番に流れます。リストの行を押すと、その話から再生します。</li>
         </ol>
         <ul>
+          <li>各エピソードの <b>✎</b> を押すと、タイトル・番組名・説明を直したり、音声を差し替えたりできます（登録した人と管理者だけ）。</li>
           <li>各エピソードの <b>📃</b> を押すと、選んでいる再生リストに入れたり外したりできます。</li>
           <li>再生リストはあなた専用です（スマホと PC で共通）。</li>
         </ul>

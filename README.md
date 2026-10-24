@@ -1,4 +1,4 @@
-# NEON WAVE RADIO（minna-radio）v1.5.0
+# NEON WAVE RADIO（minna-radio）v1.6.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
@@ -28,6 +28,8 @@ minna-radio/
 | GEMINI_API_KEY | Gemini API キー | ✔ |
 | GEMINI_TEXT_MODEL | 台本生成モデルID（例 `gemini-3.8-flash`） | 推奨 |
 | GEMINI_TTS_MODEL | 音声合成モデルID（例 `gemini-3.8-flash-tts`） | 推奨 |
+| GEMINI_TTS_FALLBACK_MODELS | 1日の上限に達したときの予備TTSモデル（カンマ区切り、例 `gemini-3.8-flash-lite-tts`） | 任意 |
+| TTS_USE_STYLE | `false` で話し方（style）をTTSに渡さない | 任意 |
 | ADMIN_EMAILS | 管理者メール（カンマ区切り） | 任意 |
 | SHOW_TEMP_PASSWORD | `true` で仮パスワードを画面にも表示（テスト時のみ） | 任意 |
 
@@ -88,6 +90,20 @@ minna-radio/
 - スマホで画面を消すと YouTube は止まります（YouTube側の仕様）。Drive／外部URLの曲はロック画面の操作に対応。
 - iPhone では音量スライダーが外部URL・YouTube に効かない場合があります（端末の音量ボタンで調整）。
 - **AIパーソナリティ**は「スタジオ → パーソナリティ」で作成・編集・複製・削除できます（声30種類から選択、話し方・キャラクター設定も自由）。標準の5人は `Code.gs` の `BUILTIN_PERSONAS` にあり、画面からは編集できません（複製して使う）。
+
+## v1.6.0 の変更点
+
+- **曲・エピソードの編集**：各行の ✎ から、タイトル・番組名・説明（曲はアーティスト・AI生成）を修正できます。登録した人と管理者だけ。
+- **音声の差し替え**：編集画面で、ファイルのアップロード／YouTube／Drive の共有リンク／外部URL に入れ替えられます。アプリで保存していた前のファイルはゴミ箱へ。
+- 番組名を変えると、そのエピソードは新しい番組の一番下に移ります。再生リスト・ライブラリに入れたものはそのまま残ります。
+- Code.gs を更新しています（`track_update` を追加）。**GAS を新バージョンで再デプロイ**してください。
+
+## v1.5.2 の変更点（Code.gs のみ）
+
+- **Gemini 3.8 TTS の新しい書き方に対応**：掛け合いは1セリフ＝1パートにして `speech_metadata.speaker` を付けて送ります（以前の「Speaker1: 〜」を1つの文で送る方式は 400 エラーになるため）。
+- パーソナリティの「話し方」を `speech_metadata.style` で渡すようにしました（声の雰囲気に反映され、読み上げはされません）。不要ならスクリプトプロパティ `TTS_USE_STYLE` を `false`。
+- 旧モデル（2.5／3.1 preview）にも自動対応。形式違いのエラーが返ると自動で切り替えます。
+- **予備のTTSモデル**：スクリプトプロパティ `GEMINI_TTS_FALLBACK_MODELS`（例 `gemini-3.8-flash-lite-tts`）を設定すると、1日の上限に達したとき自動でそちらに切り替えます（上限はモデルごと）。
 
 ## v1.5.1 の変更点（Code.gs のみ）
 
