@@ -1,5 +1,5 @@
 /* =========================================================
-   NEON WAVE RADIO - style.css  v1.6.0
+   NEON WAVE RADIO - style.css  v1.7.0
    ========================================================= */
 :root {
   --ink: #0d0a1f;          /* 夜空 */
@@ -985,3 +985,121 @@ input[type="range"] { accent-color: var(--magenta); }
 @media (max-width: 680px) {
   .track-actions .icon-btn { padding: .3em .35em; }
 }
+
+/* =========================================================
+   v1.7.0 追加：公開範囲・公開相手・共有 / 注意書きへの同意 / バージョン表示 / 接続先
+   ========================================================= */
+.brand { display: inline-flex; align-items: baseline; gap: 6px; }
+.brand-ver { font-family: var(--f-lcd); font-size: .66rem; color: var(--muted); text-shadow: none; letter-spacing: .02em; }
+.share-btn { background: rgba(255, 79, 180, .12); }
+.share-btn:hover { background: rgba(255, 79, 180, .24); }
+.link-btn { border: 0; background: none; color: var(--cyan); padding: .2em .3em; font-size: .85rem; text-decoration: underline; text-underline-offset: 3px; }
+.link-btn:hover { color: #fff; }
+
+/* ---------- 認証画面 ---------- */
+.auth-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; }
+.auth-notice { margin: 0 0 14px; padding: 10px 12px; border-radius: 12px; font-size: .88rem;
+  background: rgba(63, 230, 255, .1); box-shadow: 0 0 0 1px rgba(63, 230, 255, .35) inset; }
+
+/* ---------- 同意チェック ---------- */
+.consent { margin: 4px 0 14px; padding: 12px; border-radius: 12px; background: rgba(0, 0, 0, .25); box-shadow: 0 0 0 1px var(--line) inset; }
+.consent-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; font-size: .85rem; color: var(--muted); }
+.consent-item { display: flex; align-items: flex-start; gap: 10px; padding: 7px 4px; font-size: .9rem; cursor: pointer; border-top: 1px dashed var(--line); }
+.consent-item:first-of-type { border-top: 0; }
+.consent-item input { width: 1.25em; height: 1.25em; margin-top: .15em; flex: none; accent-color: var(--magenta); }
+.consent-item small { display: block; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.terms-body h4 { margin-top: 14px; }
+.terms-body p { margin: 4px 0 8px; }
+.terms-ver { color: var(--muted); font-size: .8rem; }
+
+/* ---------- 設定 ---------- */
+.st-gas { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.st-gas span { font-family: var(--f-lcd); font-size: .78rem; color: var(--muted); }
+.st-warn { margin: -6px 0 14px; padding: 8px 10px; border-radius: 10px; font-size: .84rem; color: #ffd27a; background: rgba(255, 179, 71, .12); }
+.st-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.help-ver { margin: 10px 0 0; text-align: right; color: var(--muted); font-size: .75rem; }
+.gs-status { min-height: 1.4em; font-size: .85rem; color: var(--muted); }
+.gs-status.is-ok { color: var(--cyan); }
+.gs-status.is-error { color: var(--danger); }
+#gsUrl { font-family: var(--f-lcd); font-size: .8rem; word-break: break-all; }
+
+/* ---------- 公開範囲（登録時） ---------- */
+.vis-box { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px 8px; margin: 10px 0 14px; }
+.vis-box legend { padding: 0 6px; font-size: .85rem; color: var(--muted); }
+.vis-box select { width: 100%; padding: .55em .7em; border-radius: var(--r-sm); border: 1px solid var(--line); background: rgba(0, 0, 0, .3); }
+.vis-box select option { background: var(--ink-2); }
+.vis-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.vis-chip { display: inline-flex; align-items: center; gap: 6px; padding: .35em .9em; border-radius: 999px; font-size: .85rem;
+  background: rgba(255, 255, 255, .06); cursor: pointer; user-select: none; }
+.vis-chip input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.vis-chip:has(input:checked) { background: var(--cyan); color: var(--ink); font-weight: 700; }
+.vis-chip.is-on { background: var(--cyan); color: var(--ink); font-weight: 700; }
+.vis-chip input:focus-visible + span { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* ---------- 曲の公開状態 ---------- */
+.icon-btn.vis-ico { font-size: 1rem; }
+.icon-btn.vis-ico.is-members, .icon-btn.vis-ico.is-all { color: var(--paper); }
+.vis-tag { display: inline-block; margin-left: 6px; padding: 0 .55em; border-radius: 999px; font-size: .7rem; vertical-align: 1px;
+  background: rgba(255, 255, 255, .08); color: var(--muted); }
+.vis-tag.is-private { background: rgba(255, 255, 255, .06); }
+.vis-tag.is-members { background: rgba(255, 79, 180, .16); color: #ff9fd5; }
+.vis-tag.is-all { background: rgba(63, 230, 255, .14); color: var(--cyan); }
+.vis-tag.is-tome { background: rgba(255, 179, 71, .18); color: var(--tube); }
+
+/* ---------- 公開と共有（1件） ---------- */
+.sh-toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; margin: 6px 0 12px;
+  border-radius: 14px; background: rgba(0, 0, 0, .28); box-shadow: 0 0 0 1px var(--line) inset; }
+.switch-big { font-size: 1.02rem; font-weight: 700; }
+.switch-big .switch-ui { transform: scale(1.2); transform-origin: left center; margin-right: 6px; }
+.sh-saved { font-size: .8rem; color: var(--cyan); white-space: nowrap; }
+.sh-h { margin: 12px 0 4px; font-size: .85rem; color: var(--muted); font-weight: 700; }
+#shScope { margin-bottom: 6px; }
+.sh-people { list-style: none; margin: 0 0 4px; padding: 0; max-height: 34vh; overflow-y: auto; border-radius: 10px; box-shadow: 0 0 0 1px var(--line) inset; }
+.sh-people li { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: .9rem; }
+.sh-people li:first-child { border-top: 0; }
+.sh-people label { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; min-width: 0; }
+.sh-people input { width: 1.2em; height: 1.2em; accent-color: var(--magenta); flex: none; }
+.sh-people .sh-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-people .sh-why { margin-left: auto; font-size: .74rem; color: var(--muted); white-space: nowrap; }
+.sh-people .empty { color: var(--muted); display: block; }
+.sh-send { margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--line); }
+.sh-send-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn-line { background: #06c755; color: #fff; box-shadow: 0 6px 20px -10px #06c755; font-weight: 700; }
+.btn-line:hover { background: #05b34c; }
+#shSendNote.is-warn { color: #ffd27a; }
+
+/* ---------- 公開管理（一覧） ---------- */
+.sm-filter { margin: 12px 0 8px; }
+.sm-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: rgba(0, 0, 0, .25); margin-bottom: 8px; }
+.sm-bulk select { padding: .4em .6em; border-radius: var(--r-sm); border: 1px solid var(--line); background: rgba(0, 0, 0, .3); }
+.sm-bulk select option { background: var(--ink-2); }
+.sm-all { display: flex; align-items: center; gap: 6px; font-size: .88rem; cursor: pointer; }
+.sm-all input, .sm-list .sm-check { width: 1.2em; height: 1.2em; accent-color: var(--magenta); }
+.sm-list, .sm-contacts { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 330px); overflow-y: auto; }
+.sm-list li, .sm-contacts li { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-top: 1px solid var(--line); }
+.sm-list li:first-child, .sm-contacts li:first-child { border-top: 0; }
+.sm-main { flex: 1; min-width: 0; }
+.sm-title { font-weight: 700; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-scope { font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-list .switch { gap: 0; }
+.sm-list .empty, .sm-contacts .empty { color: var(--muted); font-size: .9rem; display: block; padding: 14px 6px; }
+.sm-invite, .sm-add { padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, .25); margin: 12px 0; }
+.sm-invite-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.sm-invite-row .field { margin: 0; min-width: 9em; }
+.sm-add-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.sm-add-row input { flex: 1 1 14em; min-width: 0; padding: .55em .7em; border-radius: var(--r-sm); border: 1px solid var(--line); background: rgba(0, 0, 0, .3); }
+.sm-add-row select, .sm-contacts select { padding: .45em .6em; border-radius: var(--r-sm); border: 1px solid var(--line); background: rgba(0, 0, 0, .3); }
+.sm-add-row select option, .sm-contacts select option { background: var(--ink-2); }
+.sm-contacts .sm-name { font-weight: 700; }
+.sm-mutual { font-size: .72rem; padding: 0 .55em; border-radius: 999px; background: rgba(63, 230, 255, .14); color: var(--cyan); margin-left: 6px; }
+
+@media (max-width: 720px) {
+  .brand-ver { display: none; }
+  .sm-list, .sm-contacts { max-height: calc(100vh - 360px); }
+}
+/* 重ねて開くモーダルは手前に */
+#modalShare, #modalTerms, #modalGas, #modalInvite, #modalShared { z-index: 70; }
+#modalAgree { z-index: 65; }
+.slider-row.is-off { opacity: .45; }
+.consent-head .link-btn { white-space: nowrap; }
+.btn-line { padding: .45em 1.1em; font-size: .92rem; }

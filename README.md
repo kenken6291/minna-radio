@@ -1,7 +1,20 @@
-# NEON WAVE RADIO（minna-radio）v1.6.0
+# NEON WAVE RADIO（minna-radio）v1.7.0
 
 AI DJ がしゃべるラジオ／ポッドキャスト／音声SNS。
 GitHub Pages + Google Apps Script + スプレッドシート + Google Drive + Gemini API。
+
+## v1.7.0 の変更点
+
+- **公開範囲**：曲・エピソードごとに「非公開（自分だけ）／指定した相手だけ（家族・友人など）／会員全員」。新しく登録したものは**デフォルト非公開**。v1.6.0 以前の登録は「会員全員」のまま。
+- **公開相手**：家族・友人・その他のグループで管理。招待リンク（LINE など）を開いた人が「公開相手になる」を押すと、おたがいの公開相手に登録。メールアドレスでも追加可。
+- **🔒 公開管理**：自分の登録を一覧表示し、スイッチで公開／非公開を切り替え。まとめて変更も可。
+- **共有**：各曲の 🔒 から「LINEで送る／ほかのアプリ／リンクをコピー／メール」。リンク（`?t=曲ID`）を開いてログインすると、そのまま再生。
+- **注意書き・免責事項**：新規登録時に4項目（注意書き・免責事項・自己責任・当事者間での解決）へのチェックが必須。既存会員は次回ログイン時に同意画面。規約を改めるときは Code.gs の `TERMS_VERSION` を変えると全員に再同意を求めます。
+- **読み上げ**：「〜で読み上げてください」などの指示文・演出の括弧書きを、TTS に送る前に自動で取り除く。
+- **音声入力**：話し終わりの間を 1〜10 秒に拡大、「自動で送らない」モード、小さな声・語尾で切れにくい判定。文字起こしは間があっても最後まで。
+- **バージョン表示**：ヘッダー・設定・使い方に「画面／サーバー」のバージョンを表示し、違うときは再デプロイを案内。
+- **接続先**：GAS_URL は config.js。設定画面の「⚙ 接続先」から、この端末だけ別の URL に切り替え・接続テストも可。
+- 不具合修正：楽曲の 📁（ライブラリに入れる）と 🗑（削除）が反応しなかった問題。
 
 ## ディレクトリ構成
 
@@ -45,9 +58,9 @@ minna-radio/
 
 | シート | カラム |
 |---|---|
-| Users | userId, email, nickname, passwordHash, salt, mustChange, role, createdAt, lastLogin, failCount, lockedUntil |
+| Users | userId, email, nickname, passwordHash, salt, mustChange, role, createdAt, lastLogin, failCount, lockedUntil, inviteCode, agreedAt, termsVersion |
 | Sessions | token, userId, createdAt, expiresAt |
-| Tracks | id, kind(song/podcast), source(drive/youtube/url), title, artist, showName, description, url, fileId, youtubeId, mimeType, aiGenerated, ownerId, ownerName, createdAt |
+| Tracks | id, kind(song/podcast), source(drive/youtube/url), title, artist, showName, description, url, fileId, youtubeId, mimeType, aiGenerated, ownerId, ownerName, createdAt, visibility(private/members/all), shareWith(JSON), shareGroups(JSON) |
 | Rooms | id, title, topic, persona, hostId, hostName, status(open/closed), createdAt, updatedAt |
 | RoomMembers | roomId, userId, nickname, role(host/speaker/listener), hand, lastSeen |
 | RoomMessages | id, roomId, userId, nickname, type(text/voice/ai/system), text, fileId, mimeType, persona, createdAt |
@@ -58,8 +71,10 @@ minna-radio/
 | ShowOrders | showName, trackIds(JSON), updatedBy, updatedAt |
 | ListenOrders | ownerId, showName, mode(order/reverse/shuffle/custom), trackIds(JSON), updatedAt |
 | PodLists | id, ownerId, name, trackIds(JSON), createdAt, updatedAt |
+| Contacts | ownerId, contactId, group(family/friend/other), createdAt |
 
-※ Personas / Libraries / Scripts / Programs / ShowOrders / ListenOrders / PodLists シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ Personas / Libraries / Scripts / Programs / ShowOrders / ListenOrders / PodLists / Contacts シートは初回アクセス時に自動で作られます（setup の再実行は不要）。
+※ v1.7.0 で Users・Tracks に列が増えました。既存のシートには、初回アクセス時に見出しが自動で追加されます。
 
 日時はすべてミリ秒の数値（テキスト書式）で保存しています。
 

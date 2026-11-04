@@ -1,5 +1,5 @@
 /**
- * NEON WAVE RADIO - app.js  v1.6.0
+ * NEON WAVE RADIO - app.js  v1.7.0
  * 認証 / プレイヤー / AI DJ（Gemini TTS）/ ラジオエフェクト / ライブルーム
  * v1.1.0：音声ファイル書き出し / 台本の掛け合い / AIとの対話（声変換）/ パーソナリティ管理
  * v1.2.0：楽曲ライブラリ（20セット）/ 台本の保存（50セット）と曲間の放送順
@@ -8,6 +8,9 @@
  * v1.4.0：使い方ガイド / ポッドキャストのエピソード並べ替え（全員共通）/ 聞く順の設定（自分用）
  * v1.5.0：ポッドキャスト再生リスト（20セット×100話・選択と順番指定）/ まとめて登録（最大100件）
  * v1.6.0：曲・エピソードの編集（タイトル・番組名・説明・アーティスト／音声の差し替え）
+ * v1.7.0：公開範囲（非公開・指定した相手・会員全員／デフォルト非公開）と公開相手（家族・友人）、公開管理の一覧、
+ *         LINE などへの共有リンク・招待リンク、注意書き・免責事項への同意、使い方の追加、バージョン表示、
+ *         接続先（GAS URL）の切り替え、間があっても途切れにくいマイク（1〜10秒・自動で送らないモード）
  */
 'use strict';
 (() => {
@@ -106,7 +109,10 @@
     scripts: [], scriptsMax: 50, scriptId: '', rundown: [], seqNext: 0, legacyScript: null,
     libraries: [], libMax: 20, libId: '',
     program: [], progMode: false, progPos: -1, progSongIdx: [], progRun: 0,
-    convo: { me: '', ai: '', theme: '', silence: CONFIG.CONVO_SILENCE_SEC, convert: true, continuous: true, turns: [], busy: false },
+    convo: { me: '', ai: '', theme: '', silence: CONFIG.CONVO_SILENCE_SEC, convert: true, continuous: true, manual: false, turns: [], busy: false },
+    contacts: [], contactGroups: [], inviteCode: '', contactsMax: 200,   // 公開相手
+    serverVersion: '',
+    pending: null,           // 共有リンク・招待リンク（ログイン後に処理）
     exportPrefs: Object.assign({}, CONFIG.EXPORT_DEFAULT),
     view: 'radio',
     studioTab: 'talk'
@@ -137,8 +143,9 @@
         ['me', 'ai', 'theme'].forEach((k) => { if (typeof p.convo[k] === 'string') state.convo[k] = p.convo[k]; });
         if (typeof p.convo.convert === 'boolean') state.convo.convert = p.convo.convert;
         if (typeof p.convo.continuous === 'boolean') state.convo.continuous = p.convo.continuous;
+        if (typeof p.convo.manual === 'boolean') state.convo.manual = p.convo.manual;
         const sl = Number(p.convo.silence);
-        if (sl >= 1 && sl <= 5) state.convo.silence = sl;
+        if (sl >= 1 && sl <= (CONFIG.CONVO_SILENCE_MAX || 10)) state.convo.silence = sl;
       }
       if (p.exportPrefs && NWRExport.FORMATS[p.exportPrefs.format]) state.exportPrefs = Object.assign(state.exportPrefs, p.exportPrefs);
       if (p.fx) state.fx = Object.assign(state.fx, p.fx);
@@ -155,7 +162,7 @@
         libId: state.libId, plId: state.plId, scriptId: state.scriptId, rundown: state.rundown,
         convo: {
           me: state.convo.me, ai: state.convo.ai, theme: state.convo.theme, silence: state.convo.silence,
-          convert: state.convo.convert, continuous: state.convo.continuous
+          convert: state.convo.convert, continuous: state.convo.continuous, manual: state.convo.manual
         },
         exportPrefs: state.exportPrefs
       }));
@@ -165,13 +172,21 @@
   /* =========================================================
    *  API
    * ========================================================= */
+  /** 接続先（画面で切り替えていればそちら、なければ config.js の GAS_URL） */
+  function gasUrl() {
+    let o = '';
+    try { o = localStorage.getItem(CONFIG.GAS_URL_KEY || 'nwr_gas_url') || ''; } catch (e) { /* noop */ }
+    return (o || CONFIG.GAS_URL || '').trim();
+  }
+
   async function api(action, payload = {}) {
-    if (!CONFIG.GAS_URL || CONFIG.GAS_URL.includes('XXXX')) {
-      throw new Error('config.js の GAS_URL を設定してください');
+    const url = gasUrl();
+    if (!url || url.includes('XXXX')) {
+      throw new Error('config.js の GAS_URL を設定してください（画面の「⚙ 接続先」からも設定できます）');
     }
     let res;
     try {
-      res = await fetch(CONFIG.GAS_URL, {
+      res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action, token: state.token, ...payload })
@@ -186,6 +201,7 @@
       err.code = data.code;
       if (data.code === 'AUTH') forceLogout(data.error);
       if (data.code === 'MUST_CHANGE') openChangePw(true);
+      if (data.code === 'TERMS') openAgree();
       throw err;
     }
     return data;
@@ -219,7 +235,20 @@
     $('#app').hidden = true;
     $('#authScreen').hidden = false;
     showAuthTab('login');
+    renderAuthNotice();
     if (msg) setAuthMsg(esc(msg), 'error');
+  }
+
+  /** 共有リンク・招待リンクから来た人へのお知らせ */
+  function renderAuthNotice() {
+    const el = $('#authNotice');
+    const p = state.pending;
+    if (!el) return;
+    el.hidden = !p;
+    if (!p) return;
+    el.innerHTML = p.invite
+      ? '📨 <b>公開相手の招待リンク</b>を開きました。ログインすると招待を受けられます。<br>はじめての方は「新規登録」からどうぞ。'
+      : '🎧 <b>共有された曲のリンク</b>を開きました。ログインすると、すぐに聞けます。<br>はじめての方は「新規登録」からどうぞ。';
   }
 
   async function withBusy(btn, label, fn) {
@@ -252,6 +281,7 @@
           const d = await api('login', { email: f.email.value, password: f.password.value });
           state.token = d.token;
           state.user = d.user;
+          if (d.version) setServerVersion(d.version);
           saveSession();
           f.password.value = '';
           setAuthMsg('');
@@ -266,14 +296,17 @@
       const f = e.target;
       await withBusy(f.querySelector('button[type=submit]'), '送信中…', async () => {
         try {
-          const d = await api('register', { email: f.email.value, nickname: f.nickname.value });
+          if (!consentOk('register')) { setAuthMsg('注意書き・免責事項などの、すべての項目にチェックを入れてください', 'error'); return; }
+          const d = await api('register', { email: f.email.value, nickname: f.nickname.value, agree: true });
           const email = f.email.value;
           f.reset();
+          resetConsent('register');
           showAuthTab('login');
           $('#loginForm').email.value = email;
           setAuthMsg(esc(d.message) + (d.tempPassword ? `<br>仮パスワード：<code>${esc(d.tempPassword)}</code>` : '<br>メールに届いた仮パスワードでログインしてください'), 'ok');
         } catch (err) { setAuthMsg(esc(err.message), 'error'); }
       });
+      syncConsent('register');
     });
 
     $('#resetForm').addEventListener('submit', async (e) => {
@@ -355,23 +388,205 @@
 
   function enterApp() {
     $('#authScreen').hidden = true;
+    if (state.user && state.user.needsAgree) { $('#app').hidden = true; openAgree(); return; }
     $('#app').hidden = false;
     renderUser();
     if (state.appStarted) return;
     state.appStarted = true;
     loadPersonas();
-    loadTracks();
+    loadTracks().then(processPending);
+    loadContacts();
     loadLibraries();
     loadPodlists();
     loadScripts().then(loadProgram);
     const hash = location.hash.replace('#', '');
     showView(VIEWS.includes(hash) ? hash : 'radio');
     try {
-      if (!localStorage.getItem(HELP_SEEN_KEY)) {
+      if (!localStorage.getItem(HELP_SEEN_KEY) && !state.pending) {
         localStorage.setItem(HELP_SEEN_KEY, '1');
         setTimeout(() => openHelp('start'), 600);
       }
     } catch (e) { /* noop */ }
+  }
+
+  /* =========================================================
+   *  注意書き・免責事項（登録時の同意／既存会員の再同意）
+   * ========================================================= */
+  const CONSENT_ITEMS = [
+    { id: 'notice', label: '注意書き（利用上の注意）を読み、守ります', sub: '他人の権利（著作権・肖像権・プライバシー）を侵害する音声や、法令・公序良俗に反する内容は登録しません。' },
+    { id: 'disclaimer', label: '免責事項に同意します', sub: 'このサービスは個人が無償で運営しています。動作・保存・AI の出力内容は保証されず、予告なく変更・停止することがあります。' },
+    { id: 'self', label: '自分の責任（自己責任）で利用します', sub: '登録した音声・公開範囲の設定・共有したリンクの扱いは、ご自身で管理してください。' },
+    { id: 'party', label: '会員どうしのトラブルは、当事者間で話し合って解決します', sub: '運営者は会員間のトラブルの仲裁や損害の補償は行いません。' }
+  ];
+
+  const TERMS_HTML = `
+    <p class="terms-ver">NEON WAVE RADIO　注意書き・免責事項</p>
+    <h4>1. 注意書き（利用上の注意）</h4>
+    <ul>
+      <li>登録できるのは、自分で作った音声や、使うことが許されている音声だけです。市販の曲や他人の作品をアップロードしないでください（著作権）。</li>
+      <li>他人の声・名前・写真・個人情報を、本人の許可なく登録・公開しないでください（肖像権・プライバシー）。</li>
+      <li>誹謗中傷、差別、わいせつ、暴力的な内容、勧誘・営業、法令や公序良俗に反する内容は禁止です。</li>
+      <li>登録したものは最初は「非公開（自分だけ）」です。公開するときは、公開先（家族・友人・会員全員）をよく確かめてください。</li>
+      <li>共有リンクは、受け取った人が転送できます。知られたくない内容は「会員全員」や広い範囲に公開しないでください。</li>
+      <li>AI パーソナリティの話す内容は AI が自動で作ったもので、正確とは限りません。大事なことは必ずご自身で確かめてください。</li>
+      <li>運営上の必要があるとき、管理者は不適切な登録を削除したり、利用を止めたりすることがあります。</li>
+    </ul>
+    <h4>2. 免責事項</h4>
+    <ul>
+      <li>このサービスは個人が趣味・ボランティアとして無償で運営しています。</li>
+      <li>動作、データの保存、AI の出力内容について、正確さ・完全さ・継続性は保証しません。大切な音声は手元にも保存してください。</li>
+      <li>サービスの内容は予告なく変更・中断・終了することがあります。</li>
+      <li>このサービスの利用、または利用できなかったことによって生じた損害について、運営者は責任を負いません。</li>
+    </ul>
+    <h4>3. 自己責任</h4>
+    <ul>
+      <li>登録する音声、公開範囲の設定、共有したリンクの扱いは、利用者ご自身の責任で行ってください。</li>
+      <li>パスワードは他人に教えず、共用の端末では使い終わったらログアウトしてください。</li>
+    </ul>
+    <h4>4. 会員間のトラブル</h4>
+    <ul>
+      <li>会員どうしのトラブル（公開・共有した内容、やりとり、権利の侵害など）は、当事者間で話し合って解決してください。</li>
+      <li>運営者は、会員間のトラブルの仲裁・調査・損害の補償は行いません。</li>
+    </ul>
+    <h4>5. 登録する情報</h4>
+    <ul>
+      <li>メールアドレスはログインと仮パスワードのお知らせに使います。ほかの会員には表示しません（ニックネームは表示されます）。</li>
+      <li>音声は運営者の Google ドライブに保存され、文字起こしや声の変換のために Google の Gemini API に送られます。</li>
+    </ul>`;
+
+  function consentHtml(key) {
+    return `<div class="consent-head"><span>次のすべてを確認して、チェックを入れてください</span><button type="button" class="link-btn" data-terms>📜 全文を読む</button></div>` +
+      CONSENT_ITEMS.map((c) => `<label class="consent-item"><input type="checkbox" data-consent-item="${key}" value="${c.id}"><span>${esc(c.label)}<small>${esc(c.sub)}</small></span></label>`).join('');
+  }
+  function consentOk(key) {
+    const boxes = $$(`[data-consent-item="${key}"]`);
+    return boxes.length === CONSENT_ITEMS.length && boxes.every((b) => b.checked);
+  }
+  function resetConsent(key) {
+    $$(`[data-consent-item="${key}"]`).forEach((b) => { b.checked = false; });
+    syncConsent(key);
+  }
+  function syncConsent(key) {
+    const ok = consentOk(key);
+    if (key === 'register') $('#btnRegister').disabled = !ok;
+    if (key === 'agree') $('#btnAgree').disabled = !ok;
+  }
+
+  function openAgree() {
+    if (!state.token) return;
+    const m = $('#modalAgree');
+    if (!m.hidden) return;
+    resetConsent('agree');
+    m.dataset.locked = '1';
+    $('#app').hidden = true;
+    $('#authScreen').hidden = true;
+    openModal('modalAgree');
+  }
+
+  function bindTerms() {
+    $('#termsBody').innerHTML = TERMS_HTML;
+    $$('[data-consent]').forEach((box) => { box.innerHTML = consentHtml(box.dataset.consent); });
+    document.addEventListener('change', (e) => {
+      const c = e.target.closest('[data-consent-item]');
+      if (c) syncConsent(c.dataset.consentItem);
+    });
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-terms]')) { e.preventDefault(); openModal('modalTerms'); }
+    });
+    $('#btnAgree').addEventListener('click', async (e) => {
+      if (!consentOk('agree')) return;
+      await withBusy(e.currentTarget, '送信中…', async () => {
+        try {
+          const d = await api('agree_terms', { agree: true });
+          state.user = d.user;
+          saveSession();
+          const m = $('#modalAgree');
+          m.dataset.locked = '';
+          closeModal('modalAgree');
+          toast(d.message);
+          state.appStarted = false;   // 同意前に失敗した読み込みをやり直す
+          enterApp();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+    $('#btnAgreeLogout').addEventListener('click', () => {
+      const m = $('#modalAgree');
+      m.dataset.locked = '';
+      closeModal('modalAgree');
+      logout();
+    });
+  }
+
+  /* =========================================================
+   *  バージョン表示・接続先（GAS URL）
+   * ========================================================= */
+  function setServerVersion(v) {
+    state.serverVersion = String(v || '');
+    $$('.server-version').forEach((el) => (el.textContent = state.serverVersion ? 'v' + state.serverVersion : '—'));
+  }
+
+  function renderSettingsVersion() {
+    $('#stServerVer').textContent = state.serverVersion ? 'v' + state.serverVersion : '—';
+    const warn = $('#stVerWarn');
+    const diff = state.serverVersion && state.serverVersion !== CONFIG.VERSION;
+    warn.hidden = !diff;
+    if (diff) warn.textContent = `画面（v${CONFIG.VERSION}）とサーバー（v${state.serverVersion}）のバージョンが違います。GAS の Code.gs を貼り替えて「新バージョン」で再デプロイしてください。`;
+    const url = gasUrl();
+    let custom = false;
+    try { custom = !!localStorage.getItem(CONFIG.GAS_URL_KEY || 'nwr_gas_url'); } catch (e) { /* noop */ }
+    $('#stGas').textContent = (custom ? '【この端末だけ変更中】' : 'config.js：') + (url ? '…' + url.slice(-18) : '未設定');
+  }
+
+  function openGas() {
+    $('#gsUrl').value = gasUrl();
+    setGasStatus('');
+    openModal('modalGas');
+  }
+  function setGasStatus(text, type = '') {
+    const el = $('#gsStatus');
+    el.textContent = text;
+    el.className = 'gs-status' + (type ? ' is-' + type : '');
+  }
+  async function testGas(url) {
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec(\?.*)?$/.test(url)) throw new Error('「https://script.google.com/macros/s/…/exec」の形の URL を入れてください');
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'version' }) });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || '応答がエラーでした');
+    return d.version || '';
+  }
+  function bindGas() {
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-gas]')) { e.preventDefault(); openGas(); }
+    });
+    $('#btnGsTest').addEventListener('click', async (e) => {
+      const url = $('#gsUrl').value.trim();
+      await withBusy(e.currentTarget, '確認中…', async () => {
+        try {
+          const v = await testGas(url);
+          setGasStatus(`✔ つながりました（サーバー v${v || '?'}）${v && v !== CONFIG.VERSION ? '　※画面のバージョンと違います' : ''}`, 'ok');
+        } catch (err) { setGasStatus('✖ ' + (err.message || 'つながりませんでした'), 'error'); }
+      });
+    });
+    $('#btnGsSave').addEventListener('click', async (e) => {
+      const url = $('#gsUrl').value.trim();
+      await withBusy(e.currentTarget, '確認中…', async () => {
+        try {
+          const v = await testGas(url);
+          if (url === (CONFIG.GAS_URL || '').trim()) localStorage.removeItem(CONFIG.GAS_URL_KEY || 'nwr_gas_url');
+          else localStorage.setItem(CONFIG.GAS_URL_KEY || 'nwr_gas_url', url);
+          setServerVersion(v);
+          toast('接続先を保存しました。もう一度ログインしてください');
+          closeModal('modalGas');
+          if (state.token) forceLogout('');
+        } catch (err) { setGasStatus('✖ 保存できませんでした：' + (err.message || ''), 'error'); }
+      });
+    });
+    $('#btnGsReset').addEventListener('click', () => {
+      try { localStorage.removeItem(CONFIG.GAS_URL_KEY || 'nwr_gas_url'); } catch (e) { /* noop */ }
+      $('#gsUrl').value = CONFIG.GAS_URL || '';
+      setGasStatus('config.js の URL に戻しました', 'ok');
+      if (!$('#modalSettings').hidden) renderSettingsVersion();
+    });
   }
 
   /* =========================================================
@@ -1340,6 +1555,18 @@
   }
 
   const canDelete = (t) => state.user && (t.ownerId === state.user.userId || state.user.role === 'admin');
+  const isOwner = (t) => !!state.user && t.ownerId === state.user.userId;
+
+  /* ---------- 公開範囲の表示 ---------- */
+  const VIS_ICON = { private: '🔒', members: '👪', all: '🌐' };
+  const VIS_LABEL = { private: '非公開（自分だけ）', members: '指定した相手に公開中', all: '会員全員に公開中' };
+  function visTagHtml(t) {
+    if (isOwner(t)) {
+      const v = t.visibility || 'all';
+      return `<span class="vis-tag is-${esc(v)}">${VIS_ICON[v] || ''} ${esc(v === 'private' ? '非公開' : v === 'members' ? '限定公開' : '全員')}</span>`;
+    }
+    return t.visibility === 'members' ? '<span class="vis-tag is-tome">👪 あなた宛て</span>' : '';
+  }
 
   /**
    * opt.sorting : 並べ替えボタンを出す
@@ -1351,9 +1578,10 @@
     const sorting = opt.sorting != null ? !!(opt.sorting && no) : (isSong && state.reorder && !!state.libId && !!no);
     const total = opt.total || lists.songs.length;
     const label = (opt.prefix || '曲') + no;
-    const sub = t.kind === 'podcast'
+    const own = isOwner(t);
+    const sub = (t.kind === 'podcast'
       ? `${esc(t.ownerName || '')} さんが登録`
-      : `${esc(trackSubtitle(t))}（${esc(t.ownerName || '')} さんが登録）`;
+      : `${esc(trackSubtitle(t))}（${esc(t.ownerName || '')} さんが登録）`) + visTagHtml(t);
     return `
       <li class="track${sorting ? ' is-sorting' : ''}" data-track-id="${esc(t.id)}">
         <button class="track-cover" style="background:${coverBg(t.title)}" data-play="${listName}" data-i="${i}" aria-label="「${esc(t.title)}」を再生"><span class="play-ico">▶</span></button>
@@ -1370,13 +1598,14 @@
           <button class="icon-btn" data-mv="down" data-id="${esc(t.id)}" title="1つ下へ" aria-label="1つ下へ"${no === total ? ' disabled' : ''}>↓</button>
           <button class="icon-btn" data-mv="bottom" data-id="${esc(t.id)}" title="一番下へ" aria-label="一番下へ"${no === total ? ' disabled' : ''}>⤓</button>
         </div>` : `<div class="track-actions">
+          ${own ? `<button class="icon-btn vis-ico is-${esc(t.visibility || 'all')}" data-share="${esc(t.id)}" title="${esc(VIS_LABEL[t.visibility] || '')}（押すと公開設定・共有）" aria-label="公開設定と共有">${VIS_ICON[t.visibility] || '🌐'}</button>` : ''}
           <button class="icon-btn" data-next="${esc(t.id)}" title="次に再生" aria-label="次に再生">＋</button>
           ${t.kind === 'podcast' && state.plId ? `<button class="icon-btn pl-pick${plHas(t.id) ? ' is-in' : ''}" data-plpick="${esc(t.id)}" title="${plHas(t.id) ? '再生リストから外す' : '再生リストに入れる'}" aria-label="${plHas(t.id) ? '再生リストから外す' : '再生リストに入れる'}">📃</button>` : ''}
-          ${t.kind === 'song' ? `<button class="icon-btn" data-libpick=""${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
+          ${t.kind === 'song' ? `<button class="icon-btn" data-libpick="${esc(t.id)}" title="ライブラリに入れる・外す" aria-label="ライブラリに入れる・外す">📁</button>` : ''}
           ${t.kind === 'song' && state.libId ? `<button class="icon-btn" data-libout="${esc(t.id)}" title="このライブラリから外す" aria-label="このライブラリから外す">−</button>` : ''}
           ${t.source !== 'youtube' ? `<button class="icon-btn" data-export="${esc(t.id)}" title="音声ファイルに書き出す" aria-label="音声ファイルに書き出す">⬇</button>` : ''}
           ${canDelete(t) ? `<button class="icon-btn" data-edit="${esc(t.id)}" title="編集" aria-label="編集">✎</button>` : ''}
-          ${canDelete(t) ? `<button class="icon-btn" data-del=""${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
+          ${canDelete(t) ? `<button class="icon-btn" data-del="${esc(t.id)}" title="削除" aria-label="削除">🗑</button>` : ''}
         </div>`}
       </li>`;
   }
@@ -2253,6 +2482,8 @@
       if (del) { deleteTrack(del.dataset.del); return; }
       const ex = e.target.closest('[data-export]');
       if (ex) { exportTrack(ex.dataset.export); return; }
+      const sh = e.target.closest('[data-share]');
+      if (sh) { openShare(sh.dataset.share); return; }
       const lp = e.target.closest('[data-libpick]');
       if (lp) { openLibPick(lp.dataset.libpick); return; }
       const lo = e.target.closest('[data-libout]');
@@ -2311,6 +2542,8 @@
     const pl = curPl();
     $('#atToPlWrap').hidden = (kind || 'song') !== 'podcast' || !pl;
     if (pl) $('#atToPlLabel').textContent = `再生リスト「${pl.name}」にも入れる`;
+    $('#atVis').value = 'private';
+    renderAtVisGroups();
     openModal('modalAddTrack');
   }
 
@@ -2338,8 +2571,14 @@
       artist: f.artist.value.trim(),
       showName: f.showName.value.trim(),
       description: f.description.value.trim(),
-      aiGenerated: addKind === 'song' && f.aiGenerated.checked
+      aiGenerated: addKind === 'song' && f.aiGenerated.checked,
+      visibility: f.visibility.value
     };
+    if (common.visibility === 'members') {
+      common.shareGroups = $$('#atVisGroups input:checked').map((x) => x.value);
+      common.shareWith = [];
+      if (!common.shareGroups.length) { toast('公開するグループを選んでください', true); return; }
+    }
 
     // 登録する項目を集める
     let jobs = [];
@@ -2432,6 +2671,17 @@
     }
     if (!bulkCancel) closeModal('modalAddTrack');
     await loadTracks();
+    if (common.visibility !== 'private' && added.length === 1) setTimeout(() => openShare(added[0].id), 300);
+  }
+
+  function renderAtVisGroups() {
+    const box = $('#atVisGroups');
+    const on = $('#atVis').value === 'members';
+    box.hidden = !on;
+    if (!on) return;
+    const prev = new Set($$('input:checked', box).map((x) => x.value));
+    const def = prev.size ? prev : new Set(['family', 'friend']);
+    box.innerHTML = groupList().map((g) => `<label class="vis-chip"><input type="checkbox" value="${esc(g.id)}"${def.has(g.id) ? ' checked' : ''}><span>${esc(g.label)}（${groupCount(g.id)}人）</span></label>`).join('');
   }
 
   /* =========================================================
@@ -2592,7 +2842,7 @@
   function sendLeaveBeacon() {
     if (!state.room || !state.token || !navigator.sendBeacon) return;
     const body = JSON.stringify({ action: 'room_leave', token: state.token, roomId: state.room.id });
-    navigator.sendBeacon(CONFIG.GAS_URL, new Blob([body], { type: 'text/plain' }));
+    navigator.sendBeacon(gasUrl(), new Blob([body], { type: 'text/plain' }));
   }
 
   async function pollRoom() {
@@ -2972,8 +3222,10 @@
       $('#stEmail').textContent = u.email;
       $('#stRole').textContent = u.role === 'admin' ? '管理者' : 'メンバー';
       $('#profileForm').nickname.value = u.nickname;
+      renderSettingsVersion();
       openModal('modalSettings');
     });
+    $('#btnStShare').addEventListener('click', () => { closeModal('modalSettings'); openShareMgr('contacts'); });
     $('#profileForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -3415,7 +3667,8 @@
     return h1.toString(36) + h2.toString(36) + s.length.toString(36);
   }
   // 声（voice）が変わったら作り直す。v1.2.0 から指示文なしで読み上げるのでキーを更新
-  const blockKey = (b, cast) => 'blk2_' + hashStr(JSON.stringify(b.lines.map((l) => [l.speaker, l.text, personaById(cast[l.speaker]).voice])));
+  // v1.7.0 から読み上げ前に指示文を取り除くので、キーを更新して作り直す
+  const blockKey = (b, cast) => 'blk3_' + hashStr(JSON.stringify(b.lines.map((l) => [l.speaker, l.text, personaById(cast[l.speaker]).voice])));
 
   const blockBufCache = new Map();
   const blockReady = new Set();
@@ -4216,9 +4469,12 @@
     sink.connect(ctx.destination);
     Object.assign(mic, {
       active: true, stream, src, proc, sink, chunks: [], startedAt: performance.now(),
-      noiseSum: 0, noiseN: 0, thresh: 0, spoken: false, firstVoice: -1, lastVoice: -1, lastVoiceAt: 0, rate: ctx.sampleRate
+      noiseSum: 0, noiseN: 0, noise: 0, thresh: 0, spoken: false, firstVoice: -1, lastVoice: -1, lastVoiceAt: 0, rate: ctx.sampleRate,
+      loud: 0, voicedMs: 0
     });
     const silenceMs = state.convo.silence * 1000;
+    const manual = !!state.convo.manual;
+    const frameMs = (4096 / ctx.sampleRate) * 1000;
     return new Promise((resolve) => {
       mic.resolve = resolve;
       proc.onaudioprocess = (e) => {
@@ -4230,18 +4486,29 @@
         const rms = Math.sqrt(sum / d.length);
         const now = performance.now();
         const el = now - mic.startedAt;
+        // 最初の0.45秒でまわりの雑音の大きさを測る
         if (el < 450) { mic.noiseSum += rms; mic.noiseN++; onLevel(0, null); return; }
-        if (!mic.thresh) mic.thresh = Math.min(0.06, Math.max(0.012, (mic.noiseSum / Math.max(1, mic.noiseN)) * 2.8));
+        if (!mic.noise) mic.noise = Math.max(0.002, mic.noiseSum / Math.max(1, mic.noiseN));
+        // 話しはじめの判定は「雑音の約2.8倍」、話している途中は「約1.6倍」でも声とみなす（小さな声・語尾・つぶやきで切れないように）
+        const startTh = Math.min(0.06, Math.max(0.012, mic.noise * 2.8));
+        const keepTh = Math.min(0.035, Math.max(0.007, mic.noise * 1.6));
+        mic.thresh = startTh;
         const idx = mic.chunks.length - 1;
-        if (rms > mic.thresh) {
-          if (!mic.spoken) { mic.spoken = true; mic.firstVoice = idx; }
-          mic.lastVoice = idx;
-          mic.lastVoiceAt = now;
+        const isVoice = rms > (mic.spoken ? keepTh : startTh);
+        if (isVoice) {
+          mic.loud++;
+          // 咳やカチッという音で始まらないよう、2フレーム続いたら話しはじめとする
+          if (!mic.spoken && mic.loud >= 2) { mic.spoken = true; mic.firstVoice = Math.max(0, idx - 1); }
+          if (mic.spoken) { mic.lastVoice = idx; mic.lastVoiceAt = now; mic.voicedMs += frameMs; }
+        } else {
+          mic.loud = 0;
+          // 静かなときだけ、雑音の大きさをゆっくり更新（エアコンなどの変化に追従）
+          if (rms < keepTh) mic.noise = mic.noise * 0.97 + rms * 0.03;
         }
         const quiet = mic.spoken ? now - mic.lastVoiceAt : 0;
-        onLevel(Math.min(1, rms / (mic.thresh * 4)), mic.spoken ? Math.max(0, silenceMs - quiet) : null);
-        if (mic.spoken && quiet > silenceMs) micStop('auto');
-        else if (!mic.spoken && el > CONFIG.CONVO_WAIT_SEC * 1000) micStop('nospeech');
+        onLevel(Math.min(1, rms / (startTh * 4)), mic.spoken && !manual ? Math.max(0, silenceMs - quiet) : null);
+        if (!manual && mic.spoken && quiet > silenceMs) micStop('auto');
+        else if (!mic.spoken && el > CONFIG.CONVO_WAIT_SEC * 1000 * (manual ? 2 : 1)) micStop('nospeech');
         else if (el > CONFIG.CONVO_MAX_SEC * 1000) micStop('max');
       };
     });
@@ -4259,8 +4526,9 @@
       return;
     }
     const chunks = mic.chunks;
-    const from = mic.spoken ? Math.max(0, mic.firstVoice - 4) : 0;
-    const to = mic.spoken ? Math.min(chunks.length, mic.lastVoice + 6) : chunks.length;
+    // 話しはじめの少し前（約0.5秒）と、話し終わりの少しあと（約0.8秒）も残して、言葉の頭と語尾が欠けないようにする
+    const from = mic.spoken ? Math.max(0, mic.firstVoice - 6) : 0;
+    const to = mic.spoken ? Math.min(chunks.length, mic.lastVoice + 10) : chunks.length;
     const part = chunks.slice(from, to);
     const out = new Float32Array(part.reduce((n, c) => n + c.length, 0));
     let off = 0;
@@ -4287,7 +4555,9 @@
     btn.disabled = mode === 'busy';
     btn.setAttribute('aria-label', mode === 'listening' ? '話し終わったので送る' : 'マイクで話しはじめる');
     $('#btnMicCancel').hidden = mode !== 'listening';
-    $('#micStatus').textContent = text || (mode === 'listening' ? '聞いています…' : 'マイクを押して話しかけてください');
+    $('#micStatus').textContent = text || (mode === 'listening'
+      ? (state.convo.manual ? '聞いています…（話し終わったらマイクを押して送信）' : '聞いています…')
+      : 'マイクを押して話しかけてください');
     if (mode !== 'listening') btn.style.setProperty('--lv', 0);
   }
 
@@ -4385,7 +4655,8 @@
     try {
       rec = await micStart((lv, left) => {
         $('#btnMic').style.setProperty('--lv', lv.toFixed(2));
-        if (left != null && left < state.convo.silence * 1000 - 400) $('#micStatus').textContent = `このまま ${Math.ceil(left / 1000)} 秒黙ると送ります（押すとすぐ送信）`;
+        if (state.convo.manual) $('#micStatus').textContent = '聞いています…（間があいても大丈夫。話し終わったらマイクを押して送信）';
+        else if (left != null && left < state.convo.silence * 1000 - 400) $('#micStatus').textContent = `このまま ${Math.ceil(left / 1000)} 秒黙ると送ります（押すとすぐ送信）`;
         else if (left != null) $('#micStatus').textContent = '聞いています…（押すと送信）';
       });
     } catch (e) {
@@ -4458,11 +4729,20 @@
 
   function bindTalkStudio() {
     const me = $('#cvMe'), ai = $('#cvAi'), theme = $('#cvTheme');
-    const conv = $('#cvConvert'), cont = $('#cvContinuous'), sil = $('#cvSilence');
+    const conv = $('#cvConvert'), cont = $('#cvContinuous'), sil = $('#cvSilence'), man = $('#cvManual');
     theme.value = cv.theme;
     conv.checked = cv.convert;
     cont.checked = cv.continuous;
+    man.checked = cv.manual;
+    $('#cvSilenceRow').classList.toggle('is-off', cv.manual);
+    sil.max = String(CONFIG.CONVO_SILENCE_MAX || 10);
     sil.value = String(cv.silence);
+    man.addEventListener('change', () => {
+      cv.manual = man.checked;
+      $('#cvSilenceRow').classList.toggle('is-off', cv.manual);
+      savePrefs();
+      toast(cv.manual ? '話し終わったら、もう一度マイクを押して送ります' : `${cv.silence} 秒黙ると自動で送ります`);
+    });
     $('#cvSilenceVal').textContent = cv.silence;
     me.addEventListener('change', () => { cv.me = me.value; savePrefs(); renderSeats(); });
     ai.addEventListener('change', () => { cv.ai = ai.value; savePrefs(); renderSeats(); });
@@ -4537,6 +4817,446 @@
   }
 
   /* =========================================================
+   *  公開範囲・公開相手・共有（v1.7.0）
+   * ========================================================= */
+  const DEFAULT_GROUPS = [{ id: 'family', label: '家族' }, { id: 'friend', label: '友人' }, { id: 'other', label: 'その他' }];
+  const groupList = () => (state.contactGroups.length ? state.contactGroups : DEFAULT_GROUPS);
+  const groupLabel = (id) => (groupList().find((g) => g.id === id) || { label: id }).label;
+  const groupCount = (id) => state.contacts.filter((c) => c.group === id).length;
+  const appBase = () => (CONFIG.APP_URL || (location.origin + location.pathname)).replace(/[?#].*$/, '');
+
+  /** 共有リンク・招待リンクを読み取って、ログインが終わるまで覚えておく */
+  function capturePending() {
+    let p = null;
+    try {
+      const q = new URLSearchParams(location.search);
+      const t = q.get('t'), inv = q.get('invite');
+      if (t && /^[\w-]{4,40}$/.test(t)) p = { t };
+      if (inv && /^[A-Za-z0-9]{8,20}$/.test(inv)) p = { invite: inv, g: (q.get('g') || '').replace(/[^a-z]/g, '') };
+      if (p) {
+        sessionStorage.setItem(CONFIG.PENDING_KEY || 'nwr_pending', JSON.stringify(p));
+        history.replaceState(null, '', location.pathname + location.hash);
+      } else {
+        p = JSON.parse(sessionStorage.getItem(CONFIG.PENDING_KEY || 'nwr_pending') || 'null');
+      }
+    } catch (e) { /* noop */ }
+    state.pending = p;
+  }
+  function clearPending() {
+    state.pending = null;
+    try { sessionStorage.removeItem(CONFIG.PENDING_KEY || 'nwr_pending'); } catch (e) { /* noop */ }
+  }
+
+  async function processPending() {
+    const p = state.pending;
+    if (!p || !state.user || state.user.needsAgree) return;
+    clearPending();
+    if (p.invite) { openInvite(p.invite, p.g); return; }
+    if (p.t) {
+      const t = state.tracks.find((x) => x.id === p.t);
+      if (!t) { toast('この曲・エピソードは、あなたに公開されていないか、削除されたため開けません', true); return; }
+      sharedTrackId = t.id;
+      $('#sdTarget').textContent = `${t.kind === 'podcast' ? '🎧' : '🎵'} ${t.title}`;
+      $('#sdFrom').textContent = isOwner(t) ? 'あなたが登録したものです。' : `${t.ownerName || ''} さんが公開しています。`;
+      openModal('modalShared');
+    }
+  }
+  let sharedTrackId = '';
+
+  async function loadContacts() {
+    try {
+      const d = await api('contacts_list');
+      state.contacts = d.contacts || [];
+      state.contactGroups = d.groups || DEFAULT_GROUPS;
+      state.inviteCode = d.inviteCode || '';
+      state.contactsMax = d.max || 200;
+    } catch (e) { /* 表示だけなので黙っておく */ }
+    renderContacts();
+    if (!$('#modalShare').hidden) renderShare();
+    if (!$('#modalAddTrack').hidden) renderAtVisGroups();
+  }
+
+  /** 公開範囲の要約（例：👪 家族・友人（4人）） */
+  function whoCanSee(t) {
+    if (t.visibility !== 'members') return [];
+    const groups = new Set(t.shareGroups || []);
+    const ids = new Set(t.shareWith || []);
+    return state.contacts.filter((c) => groups.has(c.group) || ids.has(c.userId));
+  }
+  function scopeSummary(t) {
+    const v = t.visibility || 'all';
+    if (v === 'private') return '🔒 非公開（自分だけ）';
+    if (v === 'all') return '🌐 会員全員に公開';
+    const g = (t.shareGroups || []).map(groupLabel);
+    const extra = (t.shareWith || []).filter((id) => {
+      const c = state.contacts.find((x) => x.userId === id);
+      return c && !(t.shareGroups || []).includes(c.group);
+    }).length;
+    const people = whoCanSee(t).length;
+    const parts = g.join('・') + (extra ? `${g.length ? ' ＋' : ''}${extra}人` : '');
+    return `👪 ${parts || 'まだ誰も選んでいません'}（${people}人が聞けます）`;
+  }
+
+  /* ---------- 送る（LINE・ほかのアプリ・コピー・メール） ---------- */
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); toast('リンクをコピーしました'); }
+    catch (e) { prompt('このリンクをコピーしてください', text); }
+  }
+  async function sendVia(kind, { title, text, url }) {
+    const full = `${text}\n${url}`;
+    if (kind === 'line') {
+      window.open('https://line.me/R/share?text=' + encodeURIComponent(full), '_blank', 'noopener');
+    } else if (kind === 'native') {
+      if (navigator.share) {
+        try { await navigator.share({ title, text, url }); } catch (e) { /* キャンセル */ }
+      } else { await copyText(full); }
+    } else if (kind === 'mail') {
+      location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(full)}`;
+    } else {
+      await copyText(url);
+    }
+  }
+  const trackShareUrl = (t) => `${appBase()}?t=${encodeURIComponent(t.id)}`;
+  function trackShareMsg(t) {
+    return {
+      title: `${t.title}｜${CONFIG.APP_NAME}`,
+      text: `${t.kind === 'podcast' ? '🎧' : '🎵'}「${t.title}」を ${CONFIG.APP_NAME} で公開しました。\n（${state.user.nickname} より・リンクを開いてログインすると聞けます）`,
+      url: trackShareUrl(t)
+    };
+  }
+
+  /* ---------- 公開範囲の変更（サーバーへ順番に送る） ---------- */
+  let visChain = Promise.resolve();
+  function applyLocal(t, patch) {
+    Object.assign(t, patch);
+    renderSongs();
+    renderPodcasts();
+    if (!$('#modalShareMgr').hidden) renderShareMgr();
+    if (!$('#modalShare').hidden && shareId === t.id) renderShare();
+  }
+  function setVisibility(ids, patch, opt = {}) {
+    const targets = ids.map((id) => state.tracks.find((x) => x.id === id)).filter((t) => t && isOwner(t));
+    if (!targets.length) return Promise.resolve();
+    targets.forEach((t) => {
+      const local = {};
+      if (patch.visibility) local.visibility = patch.visibility;
+      if (patch.shareGroups) local.shareGroups = patch.shareGroups.slice();
+      if (patch.shareWith) local.shareWith = patch.shareWith.slice();
+      applyLocal(t, local);
+    });
+    const saved = $('#shSaved');
+    if (saved && !$('#modalShare').hidden) saved.textContent = '保存中…';
+    const job = visChain.then(() => api('track_visibility', Object.assign({ ids: targets.map((t) => t.id) }, patch)))
+      .then((d) => {
+        (d.tracks || []).forEach((nt) => { const t = state.tracks.find((x) => x.id === nt.id); if (t) Object.assign(t, nt); });
+        if (saved) saved.textContent = '✔ 保存しました';
+        if (!opt.silent) toast(d.message);
+        renderSongs(); renderPodcasts();
+        if (!$('#modalShareMgr').hidden) renderShareMgr();
+        if (!$('#modalShare').hidden) renderShare();
+      })
+      .catch((e) => { if (saved) saved.textContent = ''; toast(e.message, true); return loadTracks(); });
+    visChain = job.catch(() => {});
+    return job;
+  }
+
+  /** 公開をオンにする（前の設定があればそれを、なければ家族・友人へ） */
+  const lastPublic = new Map();   // 非公開にする前の公開範囲（オンに戻すときに使う）
+  function turnOnPatch(t) {
+    if (lastPublic.get(t.id) === 'all') return { visibility: 'all' };
+    const hasPick = (t.shareGroups && t.shareGroups.length) || (t.shareWith && t.shareWith.length);
+    return hasPick ? { visibility: 'members' } : { visibility: 'members', shareGroups: ['family', 'friend'], shareWith: t.shareWith || [] };
+  }
+  function toggleTrack(t, on) {
+    if (on) return setVisibility([t.id], turnOnPatch(t));
+    if (t.visibility !== 'private') lastPublic.set(t.id, t.visibility);
+    return setVisibility([t.id], { visibility: 'private' });
+  }
+
+  /* ---------- 1件の公開と共有 ---------- */
+  let shareId = '';
+  function openShare(id) {
+    const t = state.tracks.find((x) => x.id === id);
+    if (!t) return;
+    if (!isOwner(t)) {
+      sendVia('native', trackShareMsg(t));
+      return;
+    }
+    shareId = id;
+    $('#shSaved').textContent = '';
+    renderShare();
+    openModal('modalShare');
+    if (!state.contacts.length) loadContacts();
+  }
+
+  function renderShare() {
+    const t = state.tracks.find((x) => x.id === shareId);
+    if (!t) return;
+    const v = t.visibility || 'all';
+    $('#shTarget').textContent = `${t.kind === 'podcast' ? '🎧' : '🎵'} ${t.title}`;
+    $('#shOn').checked = v !== 'private';
+    $('#shOnLabel').textContent = v === 'private' ? '非公開（自分だけ）' : '公開する';
+    $('#shScopeBox').hidden = v === 'private';
+    $$('#shScope [data-scope]').forEach((b) => b.classList.toggle('is-active', b.dataset.scope === v));
+    $('#shMembersBox').hidden = v !== 'members';
+    const groups = new Set(t.shareGroups || []);
+    const ids = new Set(t.shareWith || []);
+    $('#shGroups').innerHTML = groupList().map((g) =>
+      `<label class="vis-chip"><input type="checkbox" data-shg="${esc(g.id)}"${groups.has(g.id) ? ' checked' : ''}><span>${esc(g.label)}（${groupCount(g.id)}人）</span></label>`).join('');
+    $('#shPeople').innerHTML = state.contacts.length
+      ? state.contacts.map((c) => {
+        const byGroup = groups.has(c.group);
+        return `<li><label><input type="checkbox" data-shp="${esc(c.userId)}"${byGroup || ids.has(c.userId) ? ' checked' : ''}${byGroup ? ' disabled' : ''}>
+          ${avatarHtml(c.nickname)}<span class="sh-name">${esc(c.nickname)}</span></label>
+          <span class="sh-why">${esc(groupLabel(c.group))}${byGroup ? 'で公開中' : ''}</span></li>`;
+      }).join('')
+      : '<li><span class="empty">公開相手がまだいません。下の「＋ 公開相手を増やす」から、家族や友人に招待リンクを送ってください。</span></li>';
+    const people = whoCanSee(t).length;
+    $('#shCount').textContent = v === 'members' ? `${people}人が聞けます` : '';
+    const note = $('#shSendNote');
+    let warn = false;
+    if (v === 'private') { note.textContent = '非公開のままです。送るときに「公開してから送る」を選べます。'; warn = true; }
+    else if (v === 'members' && !people) { note.textContent = 'まだ誰も選ばれていません。グループか相手を選んでから送ってください。'; warn = true; }
+    else note.textContent = v === 'all' ? '会員なら誰でも聞けます。リンクを開いてログインすると、すぐ再生できます。' : `${scopeSummary(t).replace(/^👪 /, '')}。リンクを開いてログインすると、すぐ再生できます。`;
+    note.classList.toggle('is-warn', warn);
+  }
+
+  async function shareSend(kind) {
+    const t = state.tracks.find((x) => x.id === shareId);
+    if (!t) return;
+    if (t.visibility === 'private') {
+      if (!confirm('まだ非公開です。公開してから送りますか？\n（前の設定、または「家族・友人」に公開します）')) return;
+      await toggleTrack(t, true);
+    }
+    sendVia(kind, trackShareMsg(t));
+  }
+
+  /* ---------- 公開管理（一覧） ---------- */
+  let smFilter = 'all';
+  const smSelected = new Set();
+  function myTracks() {
+    return state.tracks.filter(isOwner).slice().sort((a, b) => b.createdAt - a.createdAt);
+  }
+  function openShareMgr(tab) {
+    showSmTab(tab || 'items');
+    renderShareMgr();
+    renderContacts();
+    openModal('modalShareMgr');
+    loadContacts();
+  }
+  function showSmTab(tab) {
+    $$('[data-sm-tab]').forEach((b) => b.classList.toggle('is-active', b.dataset.smTab === tab));
+    $$('[data-sm-panel]').forEach((p) => (p.hidden = p.dataset.smPanel !== tab));
+  }
+  function smList() {
+    return myTracks().filter((t) => {
+      if (smFilter === 'on') return t.visibility !== 'private';
+      if (smFilter === 'off') return t.visibility === 'private';
+      if (smFilter === 'song' || smFilter === 'podcast') return t.kind === smFilter;
+      return true;
+    });
+  }
+  function renderShareMgr() {
+    const mine = new Set(myTracks().map((t) => t.id));
+    [...smSelected].forEach((id) => { if (!mine.has(id)) smSelected.delete(id); });
+    const list = smList();
+    $('#smList').innerHTML = list.length ? list.map((t) => `
+      <li data-track-id="${esc(t.id)}">
+        <input type="checkbox" class="sm-check" data-smsel="${esc(t.id)}"${smSelected.has(t.id) ? ' checked' : ''} aria-label="選ぶ">
+        <div class="sm-main">
+          <div class="sm-title">${t.kind === 'podcast' ? '🎧' : '🎵'} ${esc(t.title)}</div>
+          <div class="sm-scope">${esc(scopeSummary(t))}${t.kind === 'podcast' && t.showName ? `　／　${esc(t.showName)}` : ''}</div>
+        </div>
+        <label class="switch" title="${t.visibility === 'private' ? '公開する' : '非公開にする'}"><input type="checkbox" data-smtoggle="${esc(t.id)}"${t.visibility !== 'private' ? ' checked' : ''} aria-label="公開する"><span class="switch-ui"></span></label>
+        <button type="button" class="btn btn-ghost btn-small" data-share="${esc(t.id)}">共有</button>
+      </li>`).join('')
+      : `<li><span class="empty">${myTracks().length ? 'この条件に合うものはありません' : 'まだ自分の登録がありません。ラジオの「＋ 曲を追加」やポッドキャストの「＋ エピソードを登録」から登録できます'}</span></li>`;
+    $('#smSel').textContent = smSelected.size ? `${smSelected.size}件を選択中` : '';
+    $('#smAll').checked = list.length > 0 && list.every((t) => smSelected.has(t.id));
+  }
+
+  function renderContacts() {
+    const sel = (selected) => groupList().map((g) => `<option value="${esc(g.id)}"${g.id === selected ? ' selected' : ''}>${esc(g.label)}</option>`).join('');
+    const ig = $('#smInviteGroup'), ag = $('#smAddGroup');
+    if (ig) { const v = ig.value || 'family'; ig.innerHTML = sel(v); }
+    if (ag) { const v = ag.value || 'family'; ag.innerHTML = sel(v); }
+    $('#smContactCount').textContent = state.contacts.length ? `(${state.contacts.length})` : '';
+    const ul = $('#smContacts');
+    if (!ul) return;
+    ul.innerHTML = state.contacts.length ? state.contacts.map((c) => `
+      <li>
+        ${avatarHtml(c.nickname)}
+        <div class="sm-main"><span class="sm-name">${esc(c.nickname)}</span>${c.mutual ? '<span class="sm-mutual">相互</span>' : ''}</div>
+        <select data-cgroup="${esc(c.userId)}" aria-label="グループ">${sel(c.group)}</select>
+        <button type="button" class="icon-btn" data-cdel="${esc(c.userId)}" title="公開相手から外す" aria-label="公開相手から外す">🗑</button>
+      </li>`).join('')
+      : '<li><span class="empty">まだ公開相手がいません。上の「LINEで招待」から家族や友人に招待リンクを送ってみましょう。</span></li>';
+  }
+
+  function inviteMsg(group) {
+    const url = `${appBase()}?invite=${encodeURIComponent(state.inviteCode)}&g=${encodeURIComponent(group)}`;
+    return {
+      title: `${CONFIG.APP_NAME} への招待`,
+      text: `📻 ${state.user.nickname} さんから「${CONFIG.APP_NAME}」の公開相手（${groupLabel(group)}）への招待です。\nリンクを開いてログイン（はじめての方は新規登録）し、「公開相手になる」を押してください。`,
+      url
+    };
+  }
+
+  /* ---------- 招待を受ける ---------- */
+  let inviteCode = '', inviteGroup = '';
+  async function openInvite(code, g) {
+    try {
+      const d = await api('invite_info', { code });
+      if (d.self) { toast('自分の招待リンクです。家族や友人に送ってください'); return; }
+      inviteCode = code;
+      inviteGroup = g || 'friend';
+      if (d.groups && d.groups.length) state.contactGroups = d.groups;
+      $('#ivText').innerHTML = `<b>${esc(d.inviter.nickname)}</b> さんから、公開相手（${esc(groupLabel(inviteGroup))}）への招待が届いています。` +
+        (d.already ? '<br><small>（すでに公開相手に入っています。グループを変えるときも、このまま押してください）</small>' : '');
+      $('#ivGroup').innerHTML = groupList().map((x) => `<option value="${esc(x.id)}"${x.id === inviteGroup ? ' selected' : ''}>${esc(x.label)}</option>`).join('');
+      openModal('modalInvite');
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function bindShare() {
+    $('#btnShareMgr').addEventListener('click', () => openShareMgr('items'));
+    $('#atVis').addEventListener('change', renderAtVisGroups);
+
+    // 1件の公開と共有
+    $('#shOn').addEventListener('change', (e) => {
+      const t = state.tracks.find((x) => x.id === shareId);
+      if (t) toggleTrack(t, e.target.checked);
+    });
+    $('#shScope').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-scope]');
+      const t = state.tracks.find((x) => x.id === shareId);
+      if (!b || !t || t.visibility === b.dataset.scope) return;
+      const patch = { visibility: b.dataset.scope };
+      if (patch.visibility === 'members' && !(t.shareGroups || []).length && !(t.shareWith || []).length) {
+        patch.shareGroups = ['family', 'friend'];
+        patch.shareWith = [];
+      }
+      setVisibility([t.id], patch);
+    });
+    $('#shGroups').addEventListener('change', () => {
+      const t = state.tracks.find((x) => x.id === shareId);
+      if (!t) return;
+      setVisibility([t.id], { shareGroups: $$('#shGroups [data-shg]:checked').map((x) => x.dataset.shg), shareWith: t.shareWith || [] }, { silent: true });
+    });
+    $('#shPeople').addEventListener('change', () => {
+      const t = state.tracks.find((x) => x.id === shareId);
+      if (!t) return;
+      const groups = new Set(t.shareGroups || []);
+      const ids = $$('#shPeople [data-shp]').filter((x) => x.checked && !x.disabled).map((x) => x.dataset.shp);
+      // グループで入っている人も、個別の指定を残しておく（グループを外しても聞けるように）
+      const keep = (t.shareWith || []).filter((id) => { const c = state.contacts.find((x) => x.userId === id); return c && groups.has(c.group); });
+      setVisibility([t.id], { shareWith: [...new Set(ids.concat(keep))], shareGroups: t.shareGroups || [] }, { silent: true });
+    });
+    $('#btnShToContacts').addEventListener('click', () => { closeModal('modalShare'); openShareMgr('contacts'); });
+    $$('#modalShare [data-send]').forEach((b) => b.addEventListener('click', () => shareSend(b.dataset.send)));
+
+    // 公開管理
+    $$('[data-sm-tab]').forEach((b) => b.addEventListener('click', () => showSmTab(b.dataset.smTab)));
+    $('#smFilter').addEventListener('click', (e) => {
+      const c = e.target.closest('[data-smf]');
+      if (!c) return;
+      smFilter = c.dataset.smf;
+      $$('#smFilter .chip').forEach((x) => x.classList.toggle('is-active', x === c));
+      renderShareMgr();
+    });
+    $('#smList').addEventListener('change', (e) => {
+      const sel = e.target.closest('[data-smsel]');
+      if (sel) { if (sel.checked) smSelected.add(sel.dataset.smsel); else smSelected.delete(sel.dataset.smsel); renderShareMgr(); return; }
+      const tg = e.target.closest('[data-smtoggle]');
+      if (tg) { const t = state.tracks.find((x) => x.id === tg.dataset.smtoggle); if (t) toggleTrack(t, tg.checked); }
+    });
+    $('#smAll').addEventListener('change', (e) => {
+      smList().forEach((t) => { if (e.target.checked) smSelected.add(t.id); else smSelected.delete(t.id); });
+      renderShareMgr();
+    });
+    $('#btnSmBulk').addEventListener('click', async (e) => {
+      const v = $('#smBulkVis').value;
+      if (!v) { toast('「まとめて変更」から選んでください', true); return; }
+      if (!smSelected.size) { toast('変更するものにチェックを入れてください', true); return; }
+      let patch;
+      if (v === 'private' || v === 'all') patch = { visibility: v };
+      else patch = { visibility: 'members', shareGroups: v.split(',') };
+      const label = $('#smBulkVis').selectedOptions[0].textContent.trim();
+      if (!confirm(`${smSelected.size}件を「${label}」にします。よろしいですか？`)) return;
+      await withBusy(e.currentTarget, '変更中…', () => setVisibility([...smSelected], patch));
+      smSelected.clear();
+      $('#smBulkVis').value = '';
+      renderShareMgr();
+    });
+
+    // 公開相手
+    $$('[data-invite]').forEach((b) => b.addEventListener('click', async () => {
+      if (!state.inviteCode) await loadContacts();
+      if (!state.inviteCode) { toast('招待リンクを作れませんでした。もう一度お試しください', true); return; }
+      const msg = inviteMsg($('#smInviteGroup').value || 'family');
+      sendVia(b.dataset.invite === 'copy' ? 'copy' : b.dataset.invite, msg);
+    }));
+    $('#smAddForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      await withBusy(f.querySelector('button'), '追加中…', async () => {
+        try {
+          const d = await api('contact_add', { email: f.email.value, group: f.group.value });
+          toast(d.message);
+          f.email.value = '';
+          await loadContacts();
+          renderShareMgr();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+    $('#smContacts').addEventListener('change', async (e) => {
+      const s = e.target.closest('[data-cgroup]');
+      if (!s) return;
+      try {
+        const d = await api('contact_update', { userId: s.dataset.cgroup, group: s.value });
+        toast(d.message);
+        await loadContacts();
+        renderShareMgr();
+      } catch (err) { toast(err.message, true); }
+    });
+    $('#smContacts').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-cdel]');
+      if (!b) return;
+      const c = state.contacts.find((x) => x.userId === b.dataset.cdel);
+      if (!c || !confirm(`「${c.nickname}」さんを公開相手から外しますか？\n（「指定した相手に公開」の曲・エピソードが、この人には見えなくなります）`)) return;
+      try {
+        const d = await api('contact_remove', { userId: c.userId });
+        toast(d.message);
+        await loadContacts();
+        renderShareMgr();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    // 招待を受ける
+    $('#btnIvAccept').addEventListener('click', async (e) => {
+      await withBusy(e.currentTarget, '登録中…', async () => {
+        try {
+          const d = await api('invite_accept', { code: inviteCode, group: $('#ivGroup').value, inviterGroup: inviteGroup });
+          toast(d.message);
+          closeModal('modalInvite');
+          await loadContacts();
+          await loadTracks();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+
+    // 届いた曲を再生
+    $('#btnSdPlay').addEventListener('click', () => {
+      const t = state.tracks.find((x) => x.id === sharedTrackId);
+      closeModal('modalShared');
+      if (!t) return;
+      unlockMedia();
+      showView(t.kind === 'podcast' ? 'podcast' : 'radio');
+      playList([t], 0, t.kind === 'podcast' ? { podcast: true } : {});
+    });
+  }
+
+  /* =========================================================
    *  スタジオ
    * ========================================================= */
   function showStudioTab(tab) {
@@ -4568,6 +5288,9 @@
     $$('.app-version').forEach((el) => (el.textContent = CONFIG.VERSION));
     $('#lcdFreq').textContent = CONFIG.FREQUENCY;
     loadPrefs();
+    capturePending();
+    bindTerms();
+    bindGas();
     bindAuth();
     bindPlayer();
     bindDj();
@@ -4581,7 +5304,9 @@
     bindExport();
     bindChrome();
     bindMediaSession();
+    bindShare();
     startVisualizer();
+    setServerVersion('');
 
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(CONFIG.SESSION_KEY) || 'null'); } catch (e) { /* noop */ }
@@ -4594,9 +5319,11 @@
     try {
       const d = await api('me');
       state.user = d.user;
+      if (d.version) setServerVersion(d.version);
       saveSession();
       renderUser();
-    } catch (e) { /* AUTH / MUST_CHANGE は api() 内で処理済み */ }
+      if (d.user.needsAgree) openAgree();
+    } catch (e) { /* AUTH / MUST_CHANGE / TERMS は api() 内で処理済み */ }
   }
 
   document.addEventListener('DOMContentLoaded', boot);

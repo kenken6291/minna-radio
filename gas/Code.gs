@@ -1,6 +1,6 @@
 /**
  * NEON WAVE RADIO - Google Apps Script バックエンド
- * Version 1.2.0
+ * Version 1.7.0
  *   v1.1.0 パーソナリティ管理 / 台本の掛け合い（複数話者TTS） / AIとの対話（文字起こし＋声変換）
  *   v1.2.0 楽曲ライブラリ（1人20セット） / 台本の保存（1人50セット） / 読み上げに指示文を入れない
  *   v1.3.0 番組表（曲No・掛け合いNoの順番で放送）を保存
@@ -12,6 +12,9 @@
  *          パーソナリティの「話し方」を speech_metadata.style として渡す（読み上げられない）
  *          1日の上限に達したら予備のTTSモデル（GEMINI_TTS_FALLBACK_MODELS）へ自動で切り替え
  *   v1.6.0 曲・エピソードの編集（タイトル・番組名・説明・アーティスト、音声の差し替え）
+ *   v1.7.0 公開範囲（非公開／指定した会員／会員全員。新規はデフォルト非公開）と公開相手（家族・友人など）の管理、
+ *          招待リンク、利用規約・免責事項への同意（登録時＋既存会員は次回ログイン時）、
+ *          読み上げ前に指示文（「〜で読み上げてください」等）を取り除く、文字起こしで間があっても最後まで書き起こす
  *
  * スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY      : Gemini API キー（必須）
@@ -26,7 +29,8 @@
  *   SHOW_TEMP_PASSWORD  : "true" で仮パスワードを画面にも表示（テスト用）
  */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
+const TERMS_VERSION = '2026-11-05';            // 利用規約の版。変えると全員に再同意を求めます
 const APP_NAME = 'NEON WAVE RADIO';
 const HASH_ROUNDS = 300;
 const SESSION_DAYS = 30;
@@ -47,15 +51,26 @@ const MAX_SCRIPT_CHARS = 20000;                // 台本1セットの文字数
 const MAX_SHOW_EPISODES = 1000;                // 並び順に入れられるエピソード数
 const MAX_PODLISTS = 20;                       // ポッドキャスト再生リスト：1人あたりのセット数
 const MAX_PODLIST_ITEMS = 100;                 // 1セットのエピソード数
+const MAX_CONTACTS = 200;                      // 公開相手：1人あたりの人数
+const MAX_SHARE_IDS = 200;                     // 1件の曲に指定できる公開相手の人数
+const VISIBILITIES = ['private', 'members', 'all'];   // 非公開 / 指定した会員 / 会員全員
+const CONTACT_GROUPS = [
+  { id: 'family', label: '家族' },
+  { id: 'friend', label: '友人' },
+  { id: 'other', label: 'その他' }
+];
+const GROUP_IDS = CONTACT_GROUPS.map(function (g) { return g.id; });
 const GEMINI_MAX_RETRY = 3;                    // 429・5xx のときの再試行回数
 const GEMINI_MAX_WAIT_SEC = 45;                // 1回の待ち時間の上限（これより長い待ちは諦める）
 const GEMINI_TIME_BUDGET_MS = 4.5 * 60 * 1000; // 実行開始からこの時間を過ぎたら再試行しない（GASの6分制限対策）
 const EXEC_START_MS = Date.now();
 
+const SHEET_CHECKED = {};                     // 実行中に見出しを確認済みのシート
+
 const HEAD = {
-  Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil'],
+  Users:        ['userId', 'email', 'nickname', 'passwordHash', 'salt', 'mustChange', 'role', 'createdAt', 'lastLogin', 'failCount', 'lockedUntil', 'inviteCode', 'agreedAt', 'termsVersion'],
   Sessions:     ['token', 'userId', 'createdAt', 'expiresAt'],
-  Tracks:       ['id', 'kind', 'source', 'title', 'artist', 'showName', 'description', 'url', 'fileId', 'youtubeId', 'mimeType', 'aiGenerated', 'ownerId', 'ownerName', 'createdAt'],
+  Tracks:       ['id', 'kind', 'source', 'title', 'artist', 'showName', 'description', 'url', 'fileId', 'youtubeId', 'mimeType', 'aiGenerated', 'ownerId', 'ownerName', 'createdAt', 'visibility', 'shareWith', 'shareGroups'],
   Rooms:        ['id', 'title', 'topic', 'persona', 'hostId', 'hostName', 'status', 'createdAt', 'updatedAt'],
   RoomMembers:  ['roomId', 'userId', 'nickname', 'role', 'hand', 'lastSeen'],
   RoomMessages: ['id', 'roomId', 'userId', 'nickname', 'type', 'text', 'fileId', 'mimeType', 'persona', 'createdAt'],
@@ -65,7 +80,8 @@ const HEAD = {
   Programs:     ['ownerId', 'items', 'updatedAt'],
   ShowOrders:   ['showName', 'trackIds', 'updatedBy', 'updatedAt'],
   ListenOrders: ['ownerId', 'showName', 'mode', 'trackIds', 'updatedAt'],
-  PodLists:     ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt']
+  PodLists:     ['id', 'ownerId', 'name', 'trackIds', 'createdAt', 'updatedAt'],
+  Contacts:     ['ownerId', 'contactId', 'group', 'createdAt']
 };
 
 /* ============================================================
@@ -166,7 +182,7 @@ const BUILTIN_PERSONAS = [
  *  エントリポイント
  * ============================================================ */
 function doGet() {
-  return json_({ ok: true, app: APP_NAME, version: APP_VERSION });
+  return json_({ ok: true, app: APP_NAME, version: APP_VERSION, termsVersion: TERMS_VERSION });
 }
 
 function doPost(e) {
@@ -191,6 +207,17 @@ const ROUTES = {
   changePassword: changePassword_,
   resetPassword: resetPassword_,
   profileUpdate: profileUpdate_,
+  agree_terms: agreeTerms_,
+  version: function () { return { version: APP_VERSION, termsVersion: TERMS_VERSION }; },
+  // 公開相手（家族・友人など）と招待
+  contacts_list: contactsList_,
+  contact_add: contactAdd_,
+  contact_update: contactUpdate_,
+  contact_remove: contactRemove_,
+  invite_info: inviteInfo_,
+  invite_accept: inviteAccept_,
+  // 公開範囲
+  track_visibility: trackVisibility_,
   // 楽曲・ポッドキャスト
   tracks_list: tracksList_,
   track_add: trackAdd_,
@@ -312,6 +339,7 @@ function register_(req) {
   const nickname = String(req.nickname || '').trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw apiErr_('メールアドレスの形式が正しくありません');
   if (!nickname || nickname.length > 20) throw apiErr_('ニックネームは1〜20文字で入力してください');
+  if (req.agree !== true) throw apiErr_('注意書き・免責事項などのすべての項目を確認し、チェックを入れてください');
 
   return withLock_(function () {
     const users = readAll_('Users');
@@ -332,7 +360,8 @@ function register_(req) {
     append_('Users', {
       userId: 'u_' + randStr_(12), email: email, nickname: nickname,
       passwordHash: hash_(temp, salt), salt: salt, mustChange: 'true', role: role,
-      createdAt: now_(), lastLogin: '', failCount: 0, lockedUntil: 0
+      createdAt: now_(), lastLogin: '', failCount: 0, lockedUntil: 0,
+      inviteCode: randStr_(12), agreedAt: now_(), termsVersion: TERMS_VERSION
     });
     const res = { message: mailed ? '仮パスワードをメールで送信しました' : '仮パスワードを発行しました' };
     if (show) res.tempPassword = temp;
@@ -364,7 +393,7 @@ function login_(req) {
     cleanupSessions_();
     const token = randStr_(48);
     append_('Sessions', { token: token, userId: user.userId, createdAt: t, expiresAt: t + SESSION_DAYS * 86400000 });
-    return { token: token, user: publicUser_(user) };
+    return { token: token, user: publicUser_(user), version: APP_VERSION };
   });
 }
 
@@ -380,11 +409,24 @@ function logout_(req) {
 }
 
 function me_(req) {
-  return { user: publicUser_(auth_(req)) };
+  const u = auth_(req, { allowTerms: true });
+  return { user: publicUser_(findUser_(u.userId) || u), version: APP_VERSION, termsVersion: TERMS_VERSION };
+}
+
+/** 利用規約・免責事項への同意（既存会員の再同意） */
+function agreeTerms_(req) {
+  const user = auth_(req, { allowTerms: true });
+  if (req.agree !== true) throw apiErr_('すべての項目にチェックを入れてください');
+  return withLock_(function () {
+    const fresh = findUser_(user.userId);
+    update_('Users', fresh, { agreedAt: now_(), termsVersion: TERMS_VERSION });
+    CacheService.getScriptCache().remove('sess_' + req.token);
+    return { user: publicUser_(fresh), message: 'ご確認ありがとうございました' };
+  });
 }
 
 function changePassword_(req) {
-  const user = auth_(req, { allowMustChange: true });
+  const user = auth_(req, { allowMustChange: true, allowTerms: true });
   const cur = String(req.currentPassword || '');
   const next = String(req.newPassword || '');
   if (hash_(cur, user.salt) !== user.passwordHash) throw apiErr_('現在のパスワードが違います');
@@ -446,10 +488,14 @@ function auth_(req, opt) {
     if (!sess || Number(sess.expiresAt) < now_()) throw apiErr_('セッションの有効期限が切れました。再度ログインしてください', 'AUTH');
     const u = findUser_(sess.userId);
     if (!u) throw apiErr_('ユーザーが見つかりません', 'AUTH');
-    user = { userId: u.userId, email: u.email, nickname: u.nickname, role: u.role, mustChange: bool_(u.mustChange), salt: u.salt, passwordHash: u.passwordHash };
+    user = { userId: u.userId, email: u.email, nickname: u.nickname, role: u.role, mustChange: bool_(u.mustChange), salt: u.salt, passwordHash: u.passwordHash,
+             termsVersion: String(u.termsVersion || '') };
     cache.put('sess_' + token, JSON.stringify(user), 300);
   }
   if (user.mustChange && !(opt && opt.allowMustChange)) throw apiErr_('初期パスワードの変更が必要です', 'MUST_CHANGE');
+  if (!user.mustChange && user.termsVersion !== TERMS_VERSION && !(opt && opt.allowTerms)) {
+    throw apiErr_('ご利用の前に、注意書き・免責事項をご確認ください', 'TERMS');
+  }
   return user;
 }
 
@@ -458,7 +504,8 @@ function findUser_(userId) {
 }
 
 function publicUser_(u) {
-  return { userId: u.userId, email: u.email, nickname: u.nickname, role: u.role, mustChange: bool_(u.mustChange) };
+  return { userId: u.userId, email: u.email, nickname: u.nickname, role: u.role, mustChange: bool_(u.mustChange),
+           needsAgree: String(u.termsVersion || '') !== TERMS_VERSION };
 }
 
 function cleanupSessions_() {
@@ -483,7 +530,9 @@ function hash_(password, salt) {
  * ============================================================ */
 function tracksList_(req) {
   const user = auth_(req);
-  const list = readAll_('Tracks').map(publicTrack_);
+  const ctx = shareCtx_();
+  const list = readAll_('Tracks').filter(function (t) { return canView_(t, user, ctx); })
+    .map(function (t) { return publicTrack_(t, user); });
   list.sort(function (a, b) { return b.createdAt - a.createdAt; });
   const showOrders = {};
   readAll_('ShowOrders').forEach(function (r) { showOrders[String(r.showName)] = parseJsonArr_(r.trackIds); });
@@ -493,6 +542,178 @@ function tracksList_(req) {
     listenOrders[String(r.showName)] = { mode: String(r.mode || 'order'), trackIds: parseJsonArr_(r.trackIds) };
   });
   return { tracks: list, showOrders: showOrders, listenOrders: listenOrders };
+}
+
+/* ============================================================
+ *  公開範囲（非公開 / 指定した会員 / 会員全員）
+ *  ・visibility が空の行（v1.6.0 以前に登録したもの）は「会員全員」として扱う
+ *  ・「指定した会員」は、登録者の公開相手（Contacts）に入っている人のうち、
+ *    個別に選んだ人（shareWith）か、選んだグループ（shareGroups：家族・友人など）の人だけが見られる
+ * ============================================================ */
+function vis_(t) {
+  const v = String(t.visibility || '');
+  return VISIBILITIES.indexOf(v) >= 0 ? v : 'all';
+}
+
+/** 公開相手の早見表 { ownerId: { contactId: group } } */
+function shareCtx_() {
+  const map = {};
+  readAll_('Contacts').forEach(function (c) {
+    if (!map[c.ownerId]) map[c.ownerId] = {};
+    map[c.ownerId][c.contactId] = String(c.group || 'other');
+  });
+  return { contacts: map };
+}
+
+function canView_(t, user, ctx) {
+  if (t.ownerId === user.userId) return true;
+  const v = vis_(t);
+  if (v === 'all') return true;
+  if (v === 'private') return false;
+  const mine = (ctx || shareCtx_()).contacts[t.ownerId] || {};
+  const group = mine[user.userId];
+  if (!group) return false;                     // 公開相手から外された人は見られない
+  if (parseJsonArr_(t.shareWith).indexOf(user.userId) >= 0) return true;
+  return parseJsonArr_(t.shareGroups).indexOf(group) >= 0;
+}
+
+function cleanShare_(ownerId, shareWith, shareGroups) {
+  const mine = {};
+  readAll_('Contacts').forEach(function (c) { if (c.ownerId === ownerId) mine[c.contactId] = true; });
+  const ids = (Array.isArray(shareWith) ? shareWith : []).map(String)
+    .filter(function (x, i, a) { return mine[x] && a.indexOf(x) === i; }).slice(0, MAX_SHARE_IDS);
+  const groups = (Array.isArray(shareGroups) ? shareGroups : []).map(String)
+    .filter(function (x, i, a) { return GROUP_IDS.indexOf(x) >= 0 && a.indexOf(x) === i; });
+  return { ids: ids, groups: groups };
+}
+
+/** 公開範囲の変更（まとめて変更もできる）。登録者本人だけ */
+function trackVisibility_(req) {
+  const user = auth_(req);
+  const ids = (Array.isArray(req.ids) ? req.ids : [req.id]).map(String).filter(String).slice(0, 500);
+  if (!ids.length) throw apiErr_('対象を選んでください');
+  const v = req.visibility != null ? String(req.visibility) : '';
+  if (v && VISIBILITIES.indexOf(v) < 0) throw apiErr_('公開範囲の指定が正しくありません');
+  const share = (req.shareWith !== undefined || req.shareGroups !== undefined) ? cleanShare_(user.userId, req.shareWith, req.shareGroups) : null;
+  const out = withLock_(function () {
+    const rows = readAll_('Tracks').filter(function (t) { return ids.indexOf(t.id) >= 0; });
+    let n = 0;
+    rows.forEach(function (t) {
+      if (t.ownerId !== user.userId) return;
+      const patch = {};
+      if (v) patch.visibility = v;
+      if (share) {
+        if (req.shareWith !== undefined) patch.shareWith = JSON.stringify(share.ids);
+        if (req.shareGroups !== undefined) patch.shareGroups = JSON.stringify(share.groups);
+      }
+      if (Object.keys(patch).length) { update_('Tracks', t, patch); n++; }
+    });
+    return { tracks: rows.filter(function (t) { return t.ownerId === user.userId; }).map(function (t) { return publicTrack_(t, user); }), n: n };
+  });
+  if (!out.n) throw apiErr_('変更できるのは自分が登録したものだけです');
+  const label = { private: '非公開', members: '指定した相手に公開', all: '会員全員に公開' }[v] || '公開相手';
+  return { tracks: out.tracks, message: out.n + '件を「' + label + '」にしました' };
+}
+
+/* ============================================================
+ *  公開相手（家族・友人など）
+ * ============================================================ */
+function myInviteCode_(user) {
+  const u = findUser_(user.userId);
+  if (u.inviteCode) return String(u.inviteCode);
+  return withLock_(function () {
+    const fresh = findUser_(user.userId);
+    if (fresh.inviteCode) return String(fresh.inviteCode);
+    const code = randStr_(12);
+    update_('Users', fresh, { inviteCode: code });
+    return code;
+  });
+}
+
+function contactsList_(req) {
+  const user = auth_(req);
+  const users = {};
+  readAll_('Users').forEach(function (u) { users[u.userId] = u; });
+  const all = readAll_('Contacts');
+  const back = {};
+  all.forEach(function (c) { if (c.contactId === user.userId) back[c.ownerId] = true; });
+  const list = all.filter(function (c) { return c.ownerId === user.userId && users[c.contactId]; }).map(function (c) {
+    return { userId: c.contactId, nickname: users[c.contactId].nickname, group: GROUP_IDS.indexOf(String(c.group)) >= 0 ? String(c.group) : 'other',
+             mutual: !!back[c.contactId], createdAt: Number(c.createdAt) };
+  });
+  list.sort(function (a, b) { return GROUP_IDS.indexOf(a.group) - GROUP_IDS.indexOf(b.group) || a.createdAt - b.createdAt; });
+  return { contacts: list, groups: CONTACT_GROUPS, inviteCode: myInviteCode_(user), max: MAX_CONTACTS };
+}
+
+function addContactRow_(ownerId, contactId, group) {
+  const rows = readAll_('Contacts').filter(function (c) { return c.ownerId === ownerId; });
+  const row = rows.filter(function (c) { return c.contactId === contactId; })[0];
+  if (row) { if (group && row.group !== group) update_('Contacts', row, { group: group }); return false; }
+  if (rows.length >= MAX_CONTACTS) throw apiErr_('公開相手は' + MAX_CONTACTS + '人までです');
+  append_('Contacts', { ownerId: ownerId, contactId: contactId, group: group || 'friend', createdAt: now_() });
+  return true;
+}
+
+function contactAdd_(req) {
+  const user = auth_(req);
+  const email = normEmail_(req.email);
+  const group = GROUP_IDS.indexOf(String(req.group)) >= 0 ? String(req.group) : 'friend';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw apiErr_('メールアドレスの形式が正しくありません');
+  const target = readAll_('Users').filter(function (u) { return u.email === email; })[0];
+  if (!target) throw apiErr_('このメールアドレスの会員は見つかりませんでした。「招待リンク」を LINE などで送って登録してもらってください');
+  if (target.userId === user.userId) throw apiErr_('自分自身は追加できません');
+  const added = withLock_(function () { return addContactRow_(user.userId, target.userId, group); });
+  return { message: '「' + target.nickname + '」さんを' + (added ? '公開相手に追加しました' : '更新しました') };
+}
+
+function contactUpdate_(req) {
+  const user = auth_(req);
+  const group = GROUP_IDS.indexOf(String(req.group)) >= 0 ? String(req.group) : 'other';
+  withLock_(function () {
+    const row = readAll_('Contacts').filter(function (c) { return c.ownerId === user.userId && c.contactId === String(req.userId); })[0];
+    if (!row) throw apiErr_('公開相手が見つかりません');
+    update_('Contacts', row, { group: group });
+  });
+  return { message: 'グループを変更しました' };
+}
+
+function contactRemove_(req) {
+  const user = auth_(req);
+  withLock_(function () {
+    const row = readAll_('Contacts').filter(function (c) { return c.ownerId === user.userId && c.contactId === String(req.userId); })[0];
+    if (!row) throw apiErr_('公開相手が見つかりません');
+    deleteRow_('Contacts', row);
+  });
+  return { message: '公開相手から外しました（この人には、あなたの「指定した相手に公開」の曲・エピソードが見えなくなります）' };
+}
+
+function inviterByCode_(code) {
+  const c = String(code || '').trim();
+  if (!/^[A-Za-z0-9]{8,20}$/.test(c)) throw apiErr_('招待リンクが正しくありません');
+  const u = readAll_('Users').filter(function (x) { return String(x.inviteCode) === c; })[0];
+  if (!u) throw apiErr_('招待リンクが見つかりません（作り直された可能性があります）');
+  return u;
+}
+
+function inviteInfo_(req) {
+  const user = auth_(req);
+  const inviter = inviterByCode_(req.code);
+  const already = readAll_('Contacts').some(function (c) { return c.ownerId === inviter.userId && c.contactId === user.userId; });
+  return { inviter: { userId: inviter.userId, nickname: inviter.nickname }, self: inviter.userId === user.userId, already: already, groups: CONTACT_GROUPS };
+}
+
+/** 招待を受ける：おたがいの公開相手に入る（招待した人側のグループはリンクの指定、自分側は選んだグループ） */
+function inviteAccept_(req) {
+  const user = auth_(req);
+  const inviter = inviterByCode_(req.code);
+  if (inviter.userId === user.userId) throw apiErr_('自分の招待リンクです。家族や友人に送ってください');
+  const theirGroup = GROUP_IDS.indexOf(String(req.inviterGroup)) >= 0 ? String(req.inviterGroup) : 'friend';
+  const myGroup = GROUP_IDS.indexOf(String(req.group)) >= 0 ? String(req.group) : theirGroup;
+  withLock_(function () {
+    addContactRow_(inviter.userId, user.userId, theirGroup);
+    addContactRow_(user.userId, inviter.userId, myGroup);
+  });
+  return { message: '「' + inviter.nickname + '」さんと公開相手になりました' };
 }
 
 /* ---------- ポッドキャスト：エピソードの並び順（番組ごと・全員共通） ---------- */
@@ -602,13 +823,20 @@ function trackAdd_(req) {
     description: String(req.description || '').trim().slice(0, 500),
     url: '', fileId: '', youtubeId: '', mimeType: '',
     aiGenerated: req.aiGenerated ? 'true' : 'false',
-    ownerId: user.userId, ownerName: user.nickname, createdAt: now_()
+    ownerId: user.userId, ownerName: user.nickname, createdAt: now_(),
+    visibility: 'private', shareWith: '[]', shareGroups: '[]'     // 新しく登録したものはデフォルト非公開
   };
+  if (VISIBILITIES.indexOf(String(req.visibility)) >= 0) rec.visibility = String(req.visibility);
+  if (rec.visibility === 'members') {
+    const sh = cleanShare_(user.userId, req.shareWith, req.shareGroups);
+    rec.shareWith = JSON.stringify(sh.ids);
+    rec.shareGroups = JSON.stringify(sh.groups);
+  }
 
   applySource_(rec, req, source, title);
 
   withLock_(function () { append_('Tracks', rec); });
-  return { track: publicTrack_(rec), message: '「' + title + '」を登録しました' };
+  return { track: publicTrack_(rec, user), message: '「' + title + '」を登録しました' };
 }
 
 /** 登録元（YouTube / 外部URL / Drive）を rec に書き込む。登録と差し替えで共通 */
@@ -683,7 +911,7 @@ function trackUpdate_(req) {
       ['source', 'url', 'fileId', 'youtubeId', 'mimeType'].forEach(function (k) { patch[k] = newRec[k]; });
     }
     update_('Tracks', t, patch);
-    return { track: publicTrack_(t), message: '「' + title + '」を更新しました' };
+    return { track: publicTrack_(t, user), message: '「' + title + '」を更新しました' };
   });
 }
 
@@ -702,21 +930,29 @@ function trackDelete_(req) {
 }
 
 function audioGet_(req) {
-  auth_(req);
+  const user = auth_(req);
   const fileId = String(req.fileId || '');
-  const allowed = readAll_('Tracks').some(function (t) { return t.fileId === fileId; }) ||
+  const ctx = shareCtx_();
+  const allowed = readAll_('Tracks').some(function (t) { return t.fileId === fileId && canView_(t, user, ctx); }) ||
                   readAll_('RoomMessages').some(function (m) { return m.fileId === fileId; });
   if (!fileId || !allowed) throw apiErr_('この音声は再生できません');
   const blob = DriveApp.getFileById(fileId).getBlob();
   return { base64: Utilities.base64Encode(blob.getBytes()), mimeType: blob.getContentType() };
 }
 
-function publicTrack_(t) {
-  return {
+function publicTrack_(t, user) {
+  const out = {
     id: t.id, kind: t.kind, source: t.source, title: t.title, artist: t.artist, showName: t.showName,
     description: t.description, url: t.url, fileId: t.fileId, youtubeId: t.youtubeId, mimeType: t.mimeType,
-    aiGenerated: bool_(t.aiGenerated), ownerId: t.ownerId, ownerName: t.ownerName, createdAt: Number(t.createdAt)
+    aiGenerated: bool_(t.aiGenerated), ownerId: t.ownerId, ownerName: t.ownerName, createdAt: Number(t.createdAt),
+    visibility: vis_(t)
   };
+  // 公開相手の内訳は登録者本人にだけ返す
+  if (user && t.ownerId === user.userId) {
+    out.shareWith = parseJsonArr_(t.shareWith);
+    out.shareGroups = parseJsonArr_(t.shareGroups);
+  }
+  return out;
 }
 
 /* ============================================================
@@ -811,7 +1047,7 @@ function personaDelete_(req) {
 /** 指定パーソナリティ（または声と話し方）で読み上げ。試聴・自分の声の変換に使う */
 function ttsSay_(req) {
   auth_(req);
-  const text = String(req.text || '').trim().slice(0, 800);
+  const text = String(req.text || '').trim().slice(0, 1500);
   if (!text) throw apiErr_('読み上げる文章がありません');
   if (req.voice) {
     if (VOICE_NAMES.indexOf(String(req.voice)) < 0) throw apiErr_('声の指定が正しくありません');
@@ -845,11 +1081,11 @@ function djTalk_(req) {
 
 function generateScript_(p, task) {
   const body = {
-    systemInstruction: { parts: [{ text: personaInstruction_(p) + '\n\n【出力ルール】\n・読み上げる台本の本文だけを出力する\n・120〜200文字程度\n・絵文字、記号、ト書き、括弧書きの演出指示、Markdownは使わない\n・番組名は「ネオンウェーブ・ラジオ」' }] },
+    systemInstruction: { parts: [{ text: personaInstruction_(p) + '\n\n【出力ルール】\n・読み上げる台本の本文だけを出力する\n・120〜200文字程度\n・絵文字、記号、ト書き、括弧書きの演出指示、Markdownは使わない\n・「〜で読み上げてください」「以下は台本です」のような指示文・前置き・話し手の名前の見出しは書かない\n・番組名は「ネオンウェーブ・ラジオ」' }] },
     contents: [{ role: 'user', parts: [{ text: task }] }],
     generationConfig: { temperature: 0.9, maxOutputTokens: 1024 }
   };
-  const text = cleanText_(textOf_(gemini_(textModel_(), body)));
+  const text = speakerless_(speechText_(cleanText_(textOf_(gemini_(textModel_(), body)))), p.name);
   if (!text) throw apiErr_('AI DJ の台本を生成できませんでした');
   return text;
 }
@@ -931,7 +1167,7 @@ function scriptDraft_(req) {
     'テーマ：' + theme + '\n' +
     'ブロック数：' + blocks + '（1ブロック＝曲間1回分。各ブロック4〜8行で、最初のブロックは番組のオープニング、最後のブロックはエンディング風に）\n' +
     '【形式】各行は「名前：セリフ」。名前は必ず「' + a.name + '」か「' + b.name + '」。ブロックの間は「---」だけの行で区切る。\n' +
-    'セリフに絵文字、ト書き、括弧の演出指示、Markdownは入れない。前置きや説明は書かず、台本だけを出力する。';
+    'セリフに絵文字、ト書き、括弧の演出指示、Markdownは入れない。「〜で読み上げてください」のような指示文や、前置き・説明は書かず、台本だけを出力する。';
   const body = {
     systemInstruction: { parts: [{ text: 'あなたは人気ラジオ番組のベテラン放送作家です。2人のキャラクターが生きた、テンポのよい掛け合いを書きます。\n\n' + personaInstruction_(a) + '\n\n' + personaInstruction_(b) }] },
     contents: [{ role: 'user', parts: [{ text: task }] }],
@@ -1077,14 +1313,14 @@ function voiceTranscribe_(req) {
     contents: [{
       role: 'user', parts: [
         { inlineData: { mimeType: mime, data: b64 } },
-        { text: 'この音声を日本語で正確に文字起こししてください。話し言葉の雰囲気は残しつつ、「えー」「あのー」などのつなぎ言葉は省き、句読点を補ってください。文字起こしした本文だけを出力し、説明や引用符は付けないでください。人の声が入っていない場合は何も出力しないでください。' }
+        { text: 'この音声を日本語で正確に文字起こししてください。途中で言葉と言葉の間に長い沈黙（間）があっても、そこで終わりにせず、音声の最後まですべて書き起こしてください。間をはさんで続く話は、1つの発言として自然につなげてください。話し言葉の雰囲気は残しつつ、「えー」「あのー」などのつなぎ言葉は省き、句読点を補ってください。文字起こしした本文だけを出力し、説明や引用符は付けないでください。人の声が入っていない場合は何も出力しないでください。' }
       ]
     }],
     generationConfig: { temperature: 0, maxOutputTokens: 2048 }
   };
   let text = textOf_(gemini_(textModel_(), body)).replace(/^[「『"]+|[」』"]+$/g, '').trim();
   if (/^[（(]?(無音|音声なし|発話なし|なし)[）)]?。?$/.test(text)) text = '';
-  return { text: text.slice(0, 800) };
+  return { text: text.slice(0, 1500) };
 }
 
 function talkReply_(req) {
@@ -1108,13 +1344,13 @@ function talkReply_(req) {
   const sys = personaInstruction_(p) +
     '\n\n【状況】ラジオ番組の収録中です。あなたは相方の「' + partner + '」さんと2人で掛け合いトークをしています。' +
     (theme ? '今日のテーマは「' + theme + '」。' : '') +
-    '\n【出力ルール】\n・相方の発言を受けて自然に返す。共感やツッコミを入れ、ときどき質問を返して会話を広げる\n・読み上げる本文だけ。40〜140文字程度\n・絵文字、記号、ト書き、括弧の演出指示、Markdownは使わない\n・番組名は「ネオンウェーブ・ラジオ」';
+    '\n【出力ルール】\n・相方の発言を受けて自然に返す。共感やツッコミを入れ、ときどき質問を返して会話を広げる\n・読み上げる本文だけ。40〜140文字程度\n・絵文字、記号、ト書き、括弧の演出指示、Markdownは使わない\n・「〜で読み上げてください」などの指示文や、話し手の名前の見出しは書かない\n・番組名は「ネオンウェーブ・ラジオ」';
   const body = {
     systemInstruction: { parts: [{ text: sys }] },
     contents: contents,
     generationConfig: { temperature: 0.9, maxOutputTokens: 1024 }
   };
-  const text = cleanText_(textOf_(gemini_(textModel_(), body)));
+  const text = speakerless_(speechText_(cleanText_(textOf_(gemini_(textModel_(), body)))), p.name);
   if (!text) throw apiErr_('返事を作れませんでした。もう一度話しかけてください');
   return { text: text, persona: p.id, audio: tts_(p, text) };
 }
@@ -1131,6 +1367,13 @@ function textOf_(res) {
 }
 
 function cleanText_(t) { return String(t || '').replace(/[*#`]/g, '').trim(); }
+
+/** 先頭の「名前：」を外す */
+function speakerless_(t, name) {
+  let s = String(t || '');
+  if (name) s = s.replace(new RegExp('^\\s*[【\\[]?' + String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[】\\]]?\\s*[：:]\\s*'), '');
+  return s.replace(/^\s*(DJ|AI DJ|パーソナリティ)\s*[：:]\s*/i, '').trim();
+}
 
 /* ---------- TTS ----------
  * Gemini 3.8 TTS（新形式）：本文は parts[].text にそのまま（読み上げ原稿として扱われる）、
@@ -1156,9 +1399,50 @@ function setTtsFormat_(model, meta) {
 
 const useStyle_ = function () { return String(prop_('TTS_USE_STYLE') || '').toLowerCase() !== 'false'; };
 
+/* ---------- 読み上げ前の整形 ----------
+ * 「明るい声で読み上げてください」「以下の文章を朗読して」などの指示文や、
+ * （やさしく）【ナレーション】などの演出書きが声になってしまわないように取り除く。
+ */
+const SPEAK_VERB_RE = /(読み上げ|読みあげ|読んで|朗読|音読|ナレーション|ナレート|発声|話し|はなし|喋っ|しゃべっ|言っ|語っ|演じ)(て|して)?(ください|下さい|くださいね|ほしい|欲しい|ね|ちょうだい|なさい|ましょう|てください)/;
+const SPEAK_HOW_RE = /(として|ように|ような|風に|ふうに|調で|調に|口調|トーン|声で|声色|声のトーン|テンション|感情を込め|気持ちを込め|ゆっくり|はっきり|明るく|やさしく|優しく|落ち着い|元気よく|しっとり|以下|次の|この文|この台本|このセリフ)/;
+
+function speechText_(t) {
+  const orig = String(t || '').trim();
+  let s = orig;
+  // 括弧書きの演出指示（読み上げ・口調・トーンなど）を消す
+  s = s.replace(/[（(【\[［〔＜<][^）)】\]］〕＞>\n]{0,80}?(読み上げ|読みあげ|朗読|音読|ナレーション|口調|トーン|声で|調子|ト書き|演出|間を|BGM|SE|効果音|笑い|ため息|ささやき|囁き)[^）)】\]］〕＞>\n]{0,80}?[）)】\]］〕＞>]/g, '');
+  // 行頭の短い括弧書き（例：（やさしく）（笑））はト書きとみなして消す
+  s = s.replace(/(^|\n)\s*[（(【\[［〔][^）)】\]］〕。\n]{1,15}[）)】\]］〕]\s*/g, '$1');
+  // 行頭の「ナレーション：」「明るい声で読み上げて：」などの見出しを消す
+  s = s.replace(/(^|\n)\s*(ナレーション|ナレーター|語り|読み上げ|朗読|Narration|Narrator)\s*[：:]\s*/gi, '$1');
+  s = s.replace(/(^|\n)[^。！？!?\n：:]{1,40}(で|に|として|ように)(読み上げ|読みあげ|読んで|朗読|話して|語って)[^。！？!?\n：:]{0,20}[：:]\s*/g, '$1');
+  // 指示だけの文を丸ごと消す（例：「落ち着いたトーンで読み上げてください。」「以下の文章を朗読して」）
+  const parts = s.match(/[^。！？!?\n]+[。！？!?]*\n?|\n/g) || [s];
+  s = parts.filter(function (p) {
+    const x = p.trim();
+    if (!x) return true;
+    if (/^(以下|次)の(文章|文|台本|テキスト|内容|セリフ|原稿)/.test(x)) return false;
+    if (/^(それでは|では)?、?(読み上げ|朗読)(ます|を始めます|します)[。！!]?$/.test(x)) return false;
+    return !(SPEAK_VERB_RE.test(x) && SPEAK_HOW_RE.test(x));
+  }).join('');
+  s = s.replace(/^[\s、。]+/, '').replace(/\n{2,}/g, '\n').trim();
+  return s || orig;
+}
+
+/** 話し方（style）から「〜で読み上げてください」などの命令形を外して、様子だけにする */
+function styleText_(style) {
+  return String(style || '')
+    .replace(/[「」『』"]/g, '')
+    .replace(/を?(読み上げ|読みあげ|読んで|朗読|音読|ナレーション|話|はな|喋|しゃべ|言|語)(っ|し)?て(ください|下さい|ほしい|欲しい|ね)?[。]?/g, '')
+    .replace(/(してください|ください|下さい)[。]?/g, '')
+    .replace(/[。、\s]+$/, '')
+    .trim().slice(0, 200);
+}
+
 function ttsSingleBody_(model, voice, text, style) {
-  const part = { text: String(text) };
-  if (usesSpeechMetadata_(model) && style && useStyle_()) part.speechMetadata = { style: String(style).slice(0, 200) };
+  const part = { text: speechText_(text) };
+  const st = styleText_(style);
+  if (usesSpeechMetadata_(model) && st && useStyle_()) part.speechMetadata = { style: st };
   return {
     contents: [{ parts: [part] }],
     generationConfig: {
@@ -1175,11 +1459,12 @@ function ttsMultiBody_(model, turns, speakers) {
     const withStyle = useStyle_();
     parts = turns.map(function (t) {
       const meta = { speaker: t.label };
-      if (withStyle && t.style) meta.style = String(t.style).slice(0, 200);
-      return { text: String(t.text), speechMetadata: meta };
+      const st = styleText_(t.style);
+      if (withStyle && st) meta.style = st;
+      return { text: speechText_(t.text), speechMetadata: meta };
     });
   } else {
-    parts = [{ text: turns.map(function (t) { return t.label + ': ' + t.text; }).join('\n') }];
+    parts = [{ text: turns.map(function (t) { return t.label + ': ' + speechText_(t.text); }).join('\n') }];
   }
   return {
     contents: [{ parts: parts }],
@@ -1661,7 +1946,17 @@ function sheet_(name) {
     sh.getRange(1, 1, sh.getMaxRows(), HEAD[name].length).setNumberFormat('@'); // 全セル書式なしテキスト
     sh.getRange(1, 1, 1, HEAD[name].length).setValues([HEAD[name]]).setFontWeight('bold');
     sh.setFrozenRows(1);
+  } else if (!SHEET_CHECKED[name]) {
+    // 列が増えた（バージョンアップ）ときは見出しを足す
+    const need = HEAD[name].length;
+    const have = sh.getLastColumn();
+    if (have < need) {
+      if (sh.getMaxColumns() < need) sh.insertColumnsAfter(sh.getMaxColumns(), need - sh.getMaxColumns());
+      sh.getRange(1, have + 1, sh.getMaxRows(), need - have).setNumberFormat('@');
+      sh.getRange(1, have + 1, 1, need - have).setValues([HEAD[name].slice(have)]).setFontWeight('bold');
+    }
   }
+  SHEET_CHECKED[name] = true;
   return sh;
 }
 

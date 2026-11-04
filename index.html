@@ -21,6 +21,8 @@
       <span class="logo-sub">みんなでつくる、AIラジオ局</span>
     </div>
 
+    <div class="auth-notice" id="authNotice" hidden></div>
+
     <div class="seg" role="tablist">
       <button class="seg-btn is-active" data-auth-tab="login" role="tab">ログイン</button>
       <button class="seg-btn" data-auth-tab="register" role="tab">新規登録</button>
@@ -44,7 +46,8 @@
       <label class="field"><span>メールアドレス</span>
         <input type="email" name="email" required autocomplete="email" inputmode="email"></label>
       <p class="hint">登録すると仮パスワードがメールで届きます。初回ログイン時に新しいパスワードを設定します。</p>
-      <button class="btn btn-primary btn-block" type="submit">仮パスワードを受け取る</button>
+      <div class="consent" data-consent="register"></div>
+      <button class="btn btn-primary btn-block" type="submit" id="btnRegister" disabled>仮パスワードを受け取る</button>
     </form>
 
     <form id="resetForm" class="auth-form" data-auth-panel="reset" hidden>
@@ -55,6 +58,11 @@
     </form>
 
     <div id="authMsg" class="auth-msg" role="status" aria-live="polite"></div>
+    <div class="auth-links">
+      <button type="button" class="link-btn" data-help="start">❓ 使い方</button>
+      <button type="button" class="link-btn" data-terms>📜 注意書き・免責事項</button>
+      <button type="button" class="link-btn" data-gas>⚙ 接続先</button>
+    </div>
     <p class="auth-version">v<span class="app-version"></span></p>
   </div>
 </section>
@@ -62,13 +70,14 @@
 <!-- ===================== アプリ本体 ===================== -->
 <div id="app" hidden>
   <header class="topbar">
-    <a class="brand" href="#radio" data-nav="radio">NEON WAVE</a>
+    <a class="brand" href="#radio" data-nav="radio">NEON WAVE<span class="brand-ver">v<span class="app-version"></span></span></a>
     <nav class="nav" aria-label="メインメニュー">
       <button class="nav-btn is-active" data-nav="radio"><span aria-hidden="true">📻</span>ラジオ</button>
       <button class="nav-btn" data-nav="podcast"><span aria-hidden="true">🎧</span>ポッドキャスト</button>
       <button class="nav-btn" data-nav="rooms"><span aria-hidden="true">🎙</span>ライブルーム</button>
       <button class="nav-btn" data-nav="studio"><span aria-hidden="true">🎛</span>スタジオ</button>
     </nav>
+    <button class="help-btn share-btn" id="btnShareMgr" aria-label="公開と共有の管理"><span aria-hidden="true">🔒</span><span class="help-btn-label">公開管理</span></button>
     <button class="help-btn" id="btnHelp" aria-label="使い方を見る"><span aria-hidden="true">❓</span><span class="help-btn-label">使い方</span></button>
     <button class="user-chip" id="userChip" aria-label="設定を開く">
       <span class="avatar" id="userAvatar"></span><span class="user-name" id="userName"></span>
@@ -288,8 +297,9 @@
             <label class="field"><span>トークのテーマ（任意）</span><input type="text" id="cvTheme" maxlength="80" placeholder="例：子どもの頃に聴いたラジオ"></label>
             <div class="switch-row"><label class="switch"><input type="checkbox" id="cvConvert"><span class="switch-ui"></span><span>自分の声をパーソナリティの声に変える</span></label></div>
             <div class="switch-row"><label class="switch"><input type="checkbox" id="cvContinuous"><span class="switch-ui"></span><span>AI が話し終えたら、続けて聞き取る</span></label></div>
-            <label class="slider-row slider-row-wide"><span>話し終わりの間 <b id="cvSilenceVal"></b> 秒</span><input type="range" id="cvSilence" min="1" max="5" step="0.5"></label>
-            <p class="hint">考えながら話して少し間があいても、ここで決めた秒数までは聞き続けます。イヤホンを使うと、AI の声をマイクが拾いにくくなります。</p>
+            <label class="slider-row slider-row-wide" id="cvSilenceRow"><span>話し終わりの間 <b id="cvSilenceVal"></b> 秒</span><input type="range" id="cvSilence" min="1" max="10" step="0.5"></label>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="cvManual"><span class="switch-ui"></span><span>自動で送らない（もう一度マイクを押すまで聞き続ける）</span></label></div>
+            <p class="hint">考えながら話して間があいても、ここで決めた秒数までは聞き続けます。小さな声やつぶやきも「話している」と判断するので、途中で切れにくくなっています。ゆっくり話したいときは「自動で送らない」がおすすめです。イヤホンを使うと、AI の声をマイクが拾いにくくなります。</p>
           </aside>
 
           <div class="talk-booth">
@@ -519,6 +529,16 @@
       <label class="switch" data-kind-only="podcast" id="atToPlWrap" hidden><input type="checkbox" name="toPodlist" checked><span class="switch-ui"></span><span id="atToPlLabel">再生リストにも入れる</span></label>
       <p class="at-progress" id="atProgress" hidden></p>
       <label class="switch" data-kind-only="song"><input type="checkbox" name="aiGenerated"><span class="switch-ui"></span><span>AIで生成したオリジナル曲</span></label>
+      <fieldset class="vis-box">
+        <legend>🔒 公開範囲</legend>
+        <select name="visibility" id="atVis" aria-label="公開範囲">
+          <option value="private" selected>非公開（自分だけ）</option>
+          <option value="members">指定した相手だけ（家族・友人など）</option>
+          <option value="all">会員全員</option>
+        </select>
+        <div class="vis-groups" id="atVisGroups" hidden></div>
+        <small class="hint">あとから「🔒 公開管理」でいつでも変えられます。1人ずつ選ぶのも「🔒 公開管理」からできます。</small>
+      </fieldset>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-close>キャンセル</button>
         <button type="submit" class="btn btn-primary" id="atSubmit">登録する</button>
@@ -587,8 +607,14 @@
     <dl class="kv">
       <dt>メール</dt><dd id="stEmail"></dd>
       <dt>権限</dt><dd id="stRole"></dd>
-      <dt>バージョン</dt><dd>v<span class="app-version"></span></dd>
+      <dt>バージョン</dt><dd>画面 v<span class="app-version"></span> ／ サーバー <span id="stServerVer">—</span></dd>
+      <dt>接続先</dt><dd class="st-gas"><span id="stGas"></span> <button type="button" class="link-btn" data-gas>変更</button></dd>
     </dl>
+    <p class="st-warn" id="stVerWarn" hidden></p>
+    <div class="st-links">
+      <button type="button" class="btn btn-ghost btn-small" id="btnStShare">🔒 公開管理・公開相手</button>
+      <button type="button" class="btn btn-ghost btn-small" data-terms>📜 注意書き・免責事項</button>
+    </div>
     <form id="profileForm" class="inline-form">
       <label class="field"><span>ニックネーム</span><input type="text" name="nickname" maxlength="20" required></label>
       <button class="btn btn-ghost btn-small" type="submit">保存</button>
@@ -705,6 +731,7 @@
       <button type="button" class="seg-btn" data-help-tab="podcast" role="tab">🎧 ポッドキャスト</button>
       <button type="button" class="seg-btn" data-help-tab="rooms" role="tab">🎙 ライブルーム</button>
       <button type="button" class="seg-btn" data-help-tab="studio" role="tab">🎛 スタジオ</button>
+      <button type="button" class="seg-btn" data-help-tab="share" role="tab">🔒 公開・共有</button>
       <button type="button" class="seg-btn" data-help-tab="faq" role="tab">困ったとき</button>
     </div>
     <div class="help-body" id="helpBody">
@@ -725,9 +752,20 @@
           <li>☰ を押すと、再生中の一覧（プレイリスト）で次に流れる曲を確かめられます。</li>
           <li>各曲の <b>＋</b> は「次に再生」、<b>✎</b> は編集（タイトルなどの修正・音声の差し替え）、<b>⬇</b> は音声ファイルに書き出し（MP3 / WAV など）、<b>🗑</b> は削除（登録した人と管理者だけ）です。</li>
         </ul>
+        <h4>はじめての方へ（3ステップ）</h4>
+        <ol>
+          <li><b>曲やおしゃべりを登録</b>：ラジオの「＋ 曲を追加」、ポッドキャストの「＋ エピソードを登録」から。登録したものは最初は<b>非公開（自分だけ）</b>です。</li>
+          <li><b>公開相手をつくる</b>：右上の <b>🔒 公開管理 → 公開相手</b> で「招待リンク」を LINE で家族や友人に送ります。相手が開いて「公開相手になる」を押せば登録完了です。</li>
+          <li><b>公開して知らせる</b>：各曲の 🔒 を押して「公開する」をオンにし、<b>LINEで送る</b> を押すと、その曲のリンクがすぐ届きます。</li>
+        </ol>
+        <h4>各曲のボタン</h4>
+        <ul>
+          <li><b>🔒</b> 非公開 ／ <b>👪</b> 指定した相手に公開中 ／ <b>🌐</b> 会員全員に公開中。押すと公開範囲の変更と LINE などへの共有ができます（登録した本人だけ）。</li>
+          <li><b>👪 あなた宛て</b> と表示されている曲は、家族や友人があなたに公開してくれたものです。</li>
+        </ul>
         <h4>設定</h4>
         <ul>
-          <li>右上の名前（アイコン）を押すと、ニックネームの変更・パスワード変更・ログアウトができます。</li>
+          <li>右上の名前（アイコン）を押すと、ニックネームの変更・パスワード変更・ログアウト・バージョン確認ができます。</li>
           <li>この使い方は、右上の <b>❓ 使い方</b> からいつでも開けます。</li>
         </ul>
       </section>
@@ -831,6 +869,7 @@
         <h4>🎙 AIと対話</h4>
         <ul>
           <li>マイクを押して話しかけると、文字起こし → 選んだ声に変換 → AI パーソナリティが返事、の順で会話できます。</li>
+          <li>考えながら話して間があいても大丈夫。「話し終わりの間」（1〜10秒）を長めにするか、<b>自動で送らない</b> をオンにすると、もう一度マイクを押すまで聞き続けます。</li>
           <li>会話は書き出したり、<b>💾 ポッドキャストに保存</b> したりできます。</li>
         </ul>
         <h4>📝 掛け合い台本</h4>
@@ -848,6 +887,29 @@
         <p>声（30種類）・話し方・キャラクターを決めて、自分だけの AI パーソナリティを作れます。標準の5人は複製して使います。</p>
       </section>
 
+      <section data-help-panel="share" hidden>
+        <p class="help-lead">登録した曲・エピソードは、最初は<b>非公開（自分だけ）</b>です。家族や友人など、選んだ会員だけに公開できます。</p>
+        <h4>① 公開相手をつくる（家族・友人など）</h4>
+        <ol>
+          <li>右上の <b>🔒 公開管理</b> →「公開相手」タブを開きます。</li>
+          <li>招待するグループ（家族／友人／その他）を選んで <b>LINEで招待</b> を押し、相手に送ります。</li>
+          <li>相手がリンクを開いてログイン（はじめての人は新規登録）し、<b>公開相手になる</b> を押すと、おたがいの公開相手に入ります。</li>
+          <li>相手のメールアドレスがわかっていれば「メールアドレスで追加」でも追加できます（相手が会員登録済みの場合）。</li>
+        </ol>
+        <h4>② 公開する・やめる</h4>
+        <ul>
+          <li>各曲の <b>🔒</b> を押し、「公開する」をオンにします。オフにすれば、すぐ非公開に戻ります。</li>
+          <li>公開先は「指定した相手だけ」（グループ単位・1人ずつ）か「会員全員」から選べます。</li>
+          <li><b>🔒 公開管理</b> の「曲・エピソード」タブで、自分の登録を一覧で確認し、スイッチで公開／非公開を切り替えられます。チェックを付けてまとめて変えることもできます。</li>
+          <li>公開相手から外した人には、「指定した相手だけ」の曲は見えなくなります。</li>
+        </ul>
+        <h4>③ LINE などで知らせる</h4>
+        <ul>
+          <li>🔒 の画面で <b>LINEで送る</b> を押すと、その曲を開くリンクが LINE で送れます。<b>ほかのアプリ</b> でメールやメッセージにも送れます。</li>
+          <li>リンクを開いた人は、ログインするとすぐ再生できます。公開相手に入っていない人には表示されません。</li>
+        </ul>
+      </section>
+
       <section data-help-panel="faq" hidden>
         <dl class="help-faq">
           <dt>音が出ない</dt>
@@ -862,9 +924,182 @@
           <dd>YouTube は画面を消すと止まります（YouTube側の仕様）。Drive や外部URLの音声は続けて再生できます。</dd>
           <dt>マイクが使えない</dt>
           <dd>ブラウザでマイクの使用を「許可」にしてください。</dd>
+          <dt>話している途中で切れてしまう</dt>
+          <dd>スタジオ「AIと対話」の「話し終わりの間」を長く（5〜10秒）するか、「自動で送らない」をオンにしてください。</dd>
+          <dt>共有したリンクを相手が開けない</dt>
+          <dd>相手が会員登録とログインをしているか、その曲が「公開」になっていて、相手が公開先に入っているかを確かめてください。</dd>
+          <dt>AI の声が「〜で読み上げてください」と言ってしまう</dt>
+          <dd>v1.7.0 から、読み上げる前に指示文を自動で取り除きます。以前作った台本の音声は作り直されます。</dd>
+          <dt>「サーバーのバージョンが違います」と出る</dt>
+          <dd>GAS の Code.gs を貼り替えたあと「デプロイを管理 → 編集 → 新バージョン」で再デプロイしてください。</dd>
         </dl>
       </section>
 
+    </div>
+    <p class="help-ver">NEON WAVE RADIO　画面 v<span class="app-version"></span> ／ サーバー <span class="server-version">—</span></p>
+  </div>
+</div>
+
+<!-- ===================== 注意書き・免責事項 ===================== -->
+<div class="modal" id="modalTerms" hidden>
+  <div class="modal-card modal-card-help" role="dialog" aria-modal="true" aria-labelledby="tmTitle">
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+    <h3 id="tmTitle">📜 注意書き・免責事項</h3>
+    <div class="help-body terms-body" id="termsBody"></div>
+    <div class="modal-actions"><button type="button" class="btn btn-primary" data-close>閉じる</button></div>
+  </div>
+</div>
+
+<!-- 既存会員の再同意（ロック） -->
+<div class="modal" id="modalAgree" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="agTitle">
+    <h3 id="agTitle">ご利用の前に</h3>
+    <p class="hint">新しく「注意書き・免責事項」を設けました。内容を確認し、すべてにチェックを入れてください。</p>
+    <div class="consent" data-consent="agree"></div>
+    <div class="modal-actions modal-actions-split">
+      <button type="button" class="btn btn-ghost" id="btnAgreeLogout">ログアウト</button>
+      <button type="button" class="btn btn-primary" id="btnAgree" disabled>同意して使いはじめる</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 公開範囲・共有（1件） ===================== -->
+<div class="modal" id="modalShare" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="shTitle">
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+    <h3 id="shTitle">🔒 公開と共有</h3>
+    <p class="ex-target" id="shTarget"></p>
+    <div class="sh-toggle">
+      <label class="switch switch-big"><input type="checkbox" id="shOn"><span class="switch-ui"></span><span id="shOnLabel">非公開（自分だけ）</span></label>
+      <span class="sh-saved" id="shSaved" aria-live="polite"></span>
+    </div>
+    <div id="shScopeBox" hidden>
+      <div class="seg seg-small" id="shScope">
+        <button type="button" class="seg-btn" data-scope="members">👪 指定した相手だけ</button>
+        <button type="button" class="seg-btn" data-scope="all">🌐 会員全員</button>
+      </div>
+      <div id="shMembersBox">
+        <p class="sh-h">グループでまとめて</p>
+        <div class="vis-groups" id="shGroups"></div>
+        <p class="sh-h">1人ずつ <span class="count" id="shCount"></span></p>
+        <ul class="sh-people" id="shPeople"></ul>
+        <button type="button" class="link-btn" id="btnShToContacts">＋ 公開相手を増やす（招待リンク）</button>
+      </div>
+    </div>
+    <div class="sh-send">
+      <p class="sh-h">📨 知らせる</p>
+      <p class="hint" id="shSendNote"></p>
+      <div class="sh-send-btns">
+        <button type="button" class="btn btn-line" data-send="line">LINEで送る</button>
+        <button type="button" class="btn btn-ghost btn-small" data-send="native">ほかのアプリ</button>
+        <button type="button" class="btn btn-ghost btn-small" data-send="copy">リンクをコピー</button>
+        <button type="button" class="btn btn-ghost btn-small" data-send="mail">メール</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 公開管理（一覧・公開相手） ===================== -->
+<div class="modal" id="modalShareMgr" hidden>
+  <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="smTitle">
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+    <h3 id="smTitle">🔒 公開管理</h3>
+    <div class="seg" role="tablist">
+      <button type="button" class="seg-btn is-active" data-sm-tab="items" role="tab">曲・エピソード</button>
+      <button type="button" class="seg-btn" data-sm-tab="contacts" role="tab">公開相手 <span class="count" id="smContactCount"></span></button>
+    </div>
+
+    <section data-sm-panel="items">
+      <div class="chips sm-filter" id="smFilter">
+        <button type="button" class="chip is-active" data-smf="all">すべて</button>
+        <button type="button" class="chip" data-smf="on">公開中</button>
+        <button type="button" class="chip" data-smf="off">非公開</button>
+        <button type="button" class="chip" data-smf="song">🎵 曲</button>
+        <button type="button" class="chip" data-smf="podcast">🎧 エピソード</button>
+      </div>
+      <div class="sm-bulk">
+        <label class="sm-all"><input type="checkbox" id="smAll"> 全部選ぶ</label>
+        <span class="count" id="smSel"></span>
+        <select id="smBulkVis" aria-label="まとめて変更">
+          <option value="">まとめて変更…</option>
+          <option value="private">🔒 非公開にする</option>
+          <option value="family">👪 家族に公開</option>
+          <option value="family,friend">👪 家族・友人に公開</option>
+          <option value="all">🌐 会員全員に公開</option>
+        </select>
+        <button type="button" class="btn btn-primary btn-small" id="btnSmBulk">変更</button>
+      </div>
+      <ul class="sm-list" id="smList"></ul>
+    </section>
+
+    <section data-sm-panel="contacts" hidden>
+      <div class="sm-invite">
+        <p class="sh-h">📨 招待リンクを送る</p>
+        <p class="hint">リンクを開いた人がログインして「公開相手になる」を押すと、おたがいの公開相手に入ります。</p>
+        <div class="sm-invite-row">
+          <label class="field"><span>相手のグループ</span><select id="smInviteGroup"></select></label>
+          <div class="sh-send-btns">
+            <button type="button" class="btn btn-line" data-invite="line">LINEで招待</button>
+            <button type="button" class="btn btn-ghost btn-small" data-invite="native">ほかのアプリ</button>
+            <button type="button" class="btn btn-ghost btn-small" data-invite="copy">コピー</button>
+          </div>
+        </div>
+      </div>
+      <form class="sm-add" id="smAddForm">
+        <p class="sh-h">✉ メールアドレスで追加（会員登録済みの人）</p>
+        <div class="sm-add-row">
+          <input type="email" name="email" required placeholder="相手のメールアドレス" autocomplete="off" data-nofocus>
+          <select name="group" id="smAddGroup"></select>
+          <button type="submit" class="btn btn-primary btn-small">追加</button>
+        </div>
+      </form>
+      <ul class="sm-contacts" id="smContacts"></ul>
+    </section>
+  </div>
+</div>
+
+<!-- 招待を受ける -->
+<div class="modal" id="modalInvite" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ivTitle">
+    <h3 id="ivTitle">📨 公開相手の招待</h3>
+    <p id="ivText"></p>
+    <label class="field"><span>あなたから見た相手のグループ</span><select id="ivGroup"></select></label>
+    <p class="hint">公開相手になると、おたがいが「指定した相手だけ」に公開した曲・エピソードを聞けるようになります。あとで外すこともできます。</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-close>今はしない</button>
+      <button type="button" class="btn btn-primary" id="btnIvAccept">公開相手になる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 共有リンクを開いたとき -->
+<div class="modal" id="modalShared" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sdTitle">
+    <h3 id="sdTitle">🎧 届いた曲</h3>
+    <p class="ex-target" id="sdTarget"></p>
+    <p class="hint" id="sdFrom"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-close>閉じる</button>
+      <button type="button" class="btn btn-primary" id="btnSdPlay">▶ 再生する</button>
+    </div>
+  </div>
+</div>
+
+<!-- 接続先（GAS URL） -->
+<div class="modal" id="modalGas" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="gsTitle">
+    <button type="button" class="icon-btn modal-x" data-close aria-label="閉じる">✕</button>
+    <h3 id="gsTitle">⚙ 接続先（GAS URL）</h3>
+    <p class="hint">ふだんは config.js の GAS_URL を使います。ここで変えると、この端末だけ別の URL につながります。</p>
+    <label class="field"><span>GAS Web アプリの URL（…/exec）</span>
+      <textarea id="gsUrl" rows="3" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec"></textarea></label>
+    <p class="gs-status" id="gsStatus" aria-live="polite"></p>
+    <div class="modal-actions modal-actions-split">
+      <button type="button" class="btn btn-ghost btn-small" id="btnGsReset">config.js の値に戻す</button>
+      <span>
+        <button type="button" class="btn btn-ghost btn-small" id="btnGsTest">接続テスト</button>
+        <button type="button" class="btn btn-primary btn-small" id="btnGsSave">保存</button>
+      </span>
     </div>
   </div>
 </div>
